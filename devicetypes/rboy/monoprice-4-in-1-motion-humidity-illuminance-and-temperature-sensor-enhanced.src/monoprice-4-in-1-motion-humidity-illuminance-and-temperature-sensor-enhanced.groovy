@@ -11,7 +11,7 @@
  */ 
  
 def clientVersion() {
-    return "01.00.01"
+    return "01.00.02"
 }
 
 /**
@@ -19,6 +19,7 @@ def clientVersion() {
  * 
  * Copyright RBoy Apps, redistribution or reuse of code is not allowed without permission
  * Change log:
+ * 2018-1-12 - (v01.00.02) Update for security descriptors
  * 2017-10-18 - (v01.00.01) Update tile layout with ST mobile app release 2.8.0
  * 2017-7-14 - (v01.00.00) Initial release
  */
@@ -180,7 +181,7 @@ def parse(String description) {
 	} else if (description.startsWith("Err")) {
 	    result = createEvent(descriptionText:description)
 	} else {
-		def cmd = zwave.parse(description, [0x31: 5, 0x71:3, 0x7A: 2, 0x84: 2, 0x86: 1]) // Device support sensorMultiLevel(0x31) is v7 but ST only supports v5, Notification(0x71) is v4 but ST only supports v3, verion(0x86) is v2 but ST only supports v1
+		def cmd = zwave.parse(description, [0x71: 3, 0x31: 5, 0x85: 2, 0x86: 1, 0x84: 2, 0x70: 1, 0x86: 1, 0x98: 1]) // Device support sensorMultiLevel(0x31) is v7 but ST only supports v5, Notification(0x71) is v4 but ST only supports v3, verion(0x86) is v2 but ST only supports v1
 		if (cmd) {
 			result = zwaveEvent(cmd)
 		} else {
@@ -193,6 +194,16 @@ def parse(String description) {
 
     log.debug "Parse returned ${result}"
 	return result
+}
+
+def zwaveEvent(physicalgraph.zwave.commands.securityv1.SecurityMessageEncapsulation cmd) {
+    //log.debug "Security cmd: $cmd"
+	def encapsulatedCommand = cmd.encapsulatedCommand([0x71: 3, 0x31: 5, 0x85: 2, 0x86: 1, 0x84: 2, 0x70: 1, 0x86: 1])
+	//log.trace "encapsulated: $encapsulatedCommand"
+	if (encapsulatedCommand) {
+        state.security = true // This is a secure communications device we are working with
+		zwaveEvent(encapsulatedCommand)
+	}
 }
 
 def sensorValueEvent(def value) {
@@ -497,16 +508,6 @@ def zwaveEvent(physicalgraph.zwave.commands.wakeupv2.WakeUpIntervalReport cmd) {
 // WakeUpIntervalCapabilitiesReport(defaultWakeUpIntervalSeconds: 3600, maximumWakeUpIntervalSeconds: 604800, minimumWakeUpIntervalSeconds: 600, wakeUpIntervalStepSeconds: 600)
 def zwaveEvent(physicalgraph.zwave.commands.wakeupv2.WakeUpIntervalCapabilitiesReport cmd) {
     log.trace "WakeUpIntervalCapabilitiesReport $cmd"
-}
-
-def zwaveEvent(physicalgraph.zwave.commands.securityv1.SecurityMessageEncapsulation cmd) {
-    //log.debug "Security cmd: $cmd"
-	def encapsulatedCommand = cmd.encapsulatedCommand([0x71: 3, 0x80: 1, 0x85: 2, 0x98: 1, 0x86: 2, 0x84: 2, 0x31: 5, 0x70: 1]) // 0x71 should be level 4, but ST doesn't support level 4
-	//log.trace "encapsulated: $encapsulatedCommand"
-	if (encapsulatedCommand) {
-        state.security = true // This is a secure communications device we are working with
-		zwaveEvent(encapsulatedCommand)
-	}
 }
 
 def zwaveEvent(physicalgraph.zwave.commands.configurationv1.ConfigurationReport cmd) {
