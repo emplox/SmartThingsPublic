@@ -1,3 +1,13 @@
+/*
+ * -----------------------
+ * ------ SMART APP ------
+ * -----------------------
+ *
+ * STOP:  Do NOT PUBLISH the code to GitHub, it is a VIOLATION of the license terms.
+ * You are NOT allowed share, distribute, reuse or publicly host (e.g. GITHUB) the code. Refer to the license details on our website.
+ *
+ */
+
 /* **DISCLAIMER**
 * THIS SOFTWARE IS PROVIDED "AS IS" AND ANY EXPRESSED OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE REGENTS OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
 * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
@@ -11,7 +21,7 @@
 */ 
 
 def clientVersion() {
-    return "06.00.01"
+    return "06.01.02"
 }
 
 /**
@@ -20,6 +30,11 @@ def clientVersion() {
 * Copyright RBoy Apps, redistribution or reuse of code is not allowed without permission
 *
 * Change Log:
+* 2018-1-22 - (v06.01.02) When deleting a user make removing the name optional, bugfix for ST Android mobile app not refreshing page when clearing the code
+* 2018-1-21 - (v06.01.01) Added support for older device handlers to avoid a failure if users forgot to update the device handler
+* 2018-1-17 - (v06.01.00) Added support for maxCodes, codeLength, adding names to SmartLocks and other new DTH features
+* 2018-1-9 - (v06.00.03) Check if start and end time are entered for scheduled users
+* 2018-1-9 - (v06.00.02) Patch for ST not showing separate door enable button value correctly the first time you enable it
 * 2017-12-15 - (v06.00.01) Fix for manual unlock notifications not being sent
 * 2017-12-4 - (v06.00.00) Added support for stock handler using lock codes, added support for manual lock and unlock actions
 * 2017-11-14 - (v06.00.00) Added support for new ST stock DTH, improved code deletion confirmations
@@ -160,8 +175,14 @@ def setupApp() {
         }
 
         section("How many users do you want to manage?") {
+            def maxCodes = 0
+            for (lock in locks) {
+                def lockMax = lock.hasAttribute("maxCodes") ? lock.currentValue("maxCodes") : 0
+                log.trace "$lock has max users: $lockMax"
+                maxCodes = maxCodes ? (lockMax ? Math.min(lockMax, maxCodes) : maxCodes) : (lockMax ?: 0) // Take the least amongst all selected locks
+            }
             paragraph "Set only required number of users for optimal performance"
-            input name: "maxUserNames", title: "Number of users", type: "number", required: true, multiple: false, image: "http://www.rboyapps.com/images/Users.png"
+            input name: "maxUserNames", title: "Number of users${maxCodes ? " (1 to ${maxCodes})" : ""}", type: "number", required: true, multiple: false, image: "http://www.rboyapps.com/images/Users.png", range: "1..${maxCodes ?: 999}"
         }
 
         section("General Settings") {
@@ -258,7 +279,7 @@ def unlockLockActionsPage(params) {
     def user = ""
     // Get details from the passed in params when the page is loading, else get from the last saved to work around not having params on pages
     if (params.passed) {
-        user = params.user
+        user = params.user ?: ""
         log.trace "Passed from main page, using params lookup for user $user"
     } else if (atomicState.params) {
         user = atomicState.params.user ?: ""
@@ -336,8 +357,8 @@ def unlockKeypadActionsPage(params) {
     def lock = ""
     // Get details from the passed in params when the page is loading, else get from the last saved to work around not having params on pages
     if (params.passed) {
-        user = params.user
-        lock = params.lock
+        user = params.user ?: ""
+        lock = params.lock ?: ""
         log.trace "Passed from main page, using params lookup for user $user, lock $lock"
     } else if (atomicState.params) {
         user = atomicState.params.user ?: ""
@@ -386,7 +407,7 @@ def unlockManualActionsPage(params) {
     def lock = ""
     // Get details from the passed in params when the page is loading, else get from the last saved to work around not having params on pages
     if (params.passed) {
-        lock = params.lock
+        lock = params.lock ?: ""
         log.trace "Passed from main page, using params lookup for lock $lock"
     } else if (atomicState.params) {
         lock = atomicState.params.lock ?: ""
@@ -440,8 +461,8 @@ def lockKeypadActionsPage(params) {
     def lock = ""
     // Get details from the passed in params when the page is loading, else get from the last saved to work around not having params on pages
     if (params.passed) {
-        user = params.user
-        lock = params.lock
+        user = params.user ?: ""
+        lock = params.lock ?: ""
         log.trace "Passed from main page, using params lookup for user $user, lock $lock"
     } else if (atomicState.params) {
         user = atomicState.params.user ?: ""
@@ -503,7 +524,7 @@ def lockManualActionsPage(params) {
     def lock = ""
     // Get details from the passed in params when the page is loading, else get from the last saved to work around not having params on pages
     if (params.passed) {
-        lock = params.lock
+        lock = params.lock ?: ""
         log.trace "Passed from main page, using params lookup for lock $lock"
     } else if (atomicState.params) {
         lock = atomicState.params.lock ?: ""
@@ -560,6 +581,33 @@ def usersPage() {
             }
         }
 
+        // Check if the lock pin code length match on all the locks
+        def pinLen = null
+        def maxPinLen = null
+        def minPinLen = null
+        def pinLenError = false
+        for (lock in locks) {
+            def codeLen = lock.hasAttribute("pinLength") ? lock.currentValue("pinLength") : (lock.hasAttribute("codeLength") ? lock.currentValue("codeLength") : null)
+            def maxCodeLen = lock.hasAttribute("maxPINLength") ? lock.currentValue("maxPINLength") : null
+            def minCodeLen = lock.hasAttribute("minPINLength") ? lock.currentValue("minPINLength") : null
+            log.trace "$lock fixed code length: $codeLen, max code length: $maxCodeLen, min code length: $minCodeLen"
+            if (codeLen && pinLen) { // If lock has fixed pin length and previous lock also had fixed pin length
+                if ((codeLen != pinLen) || (maxPinLen && (codeLen > maxPinLen)) || (minPinLen && (codeLen < minPinLen))) { // Check if we have pin mismatches
+                    pinLenError = true // All locks must have the same pinLength
+                }
+            } else if (codeLen) { // If lock has fixed pin length
+                pinLen = codeLen // Save the length for future use
+            } else if (minCodeLen && maxCodeLen) { // Check for range validation
+                if (!minPinLen || (minCodeLen > minPinLen)) {
+                    minPinLen = minCodeLen
+                }
+                if (!maxPinLen || (maxCodeLen < maxPinLen)) {
+                    maxPinLen = maxCodeLen
+                }
+            }
+        }
+        log.trace "Configured lock fixed code length: $pinLen, max code length: $maxPinLen, min code length: $minPinLen"
+
         for (int i = 1; i <= settings.maxUserNames; i++) {
             def priorName = settings."userNames${i}"
             def priorCode = settings."userCodes${i}"
@@ -577,6 +625,12 @@ def usersPage() {
 
             // Check for errors and display messages
             section("User Management Slot #${i}") {
+
+                if (pinLenError) {
+                    def msg = "YOUR LOCKS ARE CONFIGURED TO ACCEPT DIFFERENT CODE DIGIT LENGTHS, PROGRAMMING WILL FAIL!"
+                    paragraph title: msg, required: true, ""
+                }
+
                 if (settings."userNames${i}") { // Do all the checks only if user has been configured
                     // Sanity check, codes cannot be reused in the same lock (codes have to be unique to the same slot
                     for (int j = 1; j <= settings.maxUserNames; j++) {
@@ -595,9 +649,10 @@ def usersPage() {
                     // Check if the lock pin code length match the pin code length entered by the user
                     def userLocks = settings."userLocks${i}" ?: locks*.displayName // Use the defined locks or if not defined then check all locks
                     for (lock in locks) {
-                        if (userLocks?.contains(lock.displayName) && lock.hasAttribute("pinLength") && lock.currentValue("pinLength")) { // Check if the lock support reporting pinLength and it has a valid number to report (not 0 or null)
-                            if ((priorCode?.size() > 0) && (lock.currentValue("pinLength") != priorCode.size())) { // If we have a code to program
-                                def msg = "YOUR LOCK IS CONFIGURED TO ACCEPT ${lock.currentValue("pinLength")} DIGIT CODES ONLY, PROGRAMMING WILL FAIL!"
+                        def codeLen = lock.hasAttribute("pinLength") ? lock.currentValue("pinLength") : (lock.hasAttribute("codeLength") ? lock.currentValue("codeLength") : null)
+                        if (userLocks?.contains(lock.displayName) && codeLen) { // Check if the lock support reporting pinLength and it has a valid number to report (not 0 or null)
+                            if ((priorCode?.size() > 0) && (codeLen != priorCode.size())) { // If we have a code to program
+                                def msg = "YOUR LOCK IS CONFIGURED TO ACCEPT ${codeLen} DIGIT CODES ONLY, PROGRAMMING WILL FAIL!"
                                 paragraph title: msg, required: true, ""
                             }
                         }
@@ -669,8 +724,8 @@ def usersPage() {
                 }
 
                 // User and code details/types
-                input "userNames${i}", "text", description: "Tap to set", title: "Name", multiple: false, required: (settings."userCodes${i}" ? true : false), submitOnChange: true, image: "http://www.rboyapps.com/images/User.png"
-                input "userCodes${i}", "text", description: "Tap to set", title: "Code", multiple: false, required: (settings."userNames${i}" ? true : false), submitOnChange: true, image: "http://www.rboyapps.com/images/Code.png" // Input it type text otherwise users can't enter the number starting with 0
+                input "userNames${i}", "text", description: "Tap to set", title: "Name", multiple: false, required: (settings."userCodes${i}" ? true : false), submitOnChange: false, image: "http://www.rboyapps.com/images/User.png"
+                input "userCodes${i}", "text", description: "Tap to set", title: "Code${pinLen ? " (${pinLen} digits)" : ((minPinLen && maxPinLen) ? " (${minPinLen}-${maxPinLen} digits)" : "")}", multiple: false, required: false, submitOnChange: true, image: "http://www.rboyapps.com/images/Code.png" // Input it type text otherwise users can't enter the number starting with 0
 
                 if (priorName) {
                     // Lock selection
@@ -752,7 +807,7 @@ def scheduleCodesPage(params) {
     def schedule = ""
     // Get user from the passed in params when the page is loading, else get from the last saved to work around not having params on pages
     if (params.user) {
-        user = params.user
+        user = params.user ?: ""
         log.trace "Passed from main page, using params lookup for user $user"
     } else if (atomicState.params) {
         user = atomicState.params.user ?: ""
@@ -765,7 +820,7 @@ def scheduleCodesPage(params) {
 
     // Get schedule from the passed in params when the page is loading, else get from the last saved to work around not having params on pages
     if (params.schedule) {
-        schedule = params.schedule
+        schedule = params.schedule ?: ""
         log.trace "Passed from main page, using params lookup for schedule $schedule"
     } else if (atomicState.params) {
         schedule = atomicState.params.schedule ?: ""
@@ -778,10 +833,10 @@ def scheduleCodesPage(params) {
 
     dynamicPage(name:"scheduleCodesPage", title: "Define schedule ${schedule}" + (user ? " for user $name." : ""), uninstall: false, install: false) {
         section() {
+            def i = user as Integer
             def priorUserDayOfWeek = settings."userDayOfWeek${schedule}${i}"
             def priorUserStartTime = settings."userStartTime${schedule}${i}"
             def priorUserEndTime = settings."userEndTime${schedule}${i}"
-            def i = user as Integer
             log.debug "Schedule:$schedule, User:$i, Name: $name, UserDayOfWeek: $priorUserDayOfWeek, UserStartTime: $priorUserStartTime, UserEndTime: $priorUserEndTime"
 
             input "userStartTime${schedule}${i}", "time", title: "Start Time", required: false
@@ -864,9 +919,10 @@ def appTouch() {
         // Check if the lock pin code length match the pin code length entered by the user
         def userLocks = settings."userLocks${i}" ?: locks*.displayName // Use the defined locks or if not defined then check all locks
         for (lock in locks) {
-            if (userLocks?.contains(lock.displayName) && lock.hasAttribute("pinLength") && lock.currentValue("pinLength")) { // Check if the lock support reporting pinLength and it has a valid number to report (not 0 or null)
-                if ((code1?.size() > 0) && (lock.currentValue("pinLength") != code1.size())) { // If we have a code to program
-                    def msg = "CODE LENGTH DOES NOT MATCH LOCK PROGRAMMING LENGTH, PROGRAMMING WILL FAIL - USER $name1 IN SLOT $i REQUIRES ${lock.currentValue("pinLength")} DIGITS FOR LOCK ${lock}"
+            def codeLen = lock.hasAttribute("pinLength") ? lock.currentValue("pinLength") : (lock.hasAttribute("codeLength") ? lock.currentValue("codeLength") : null)
+            if (userLocks?.contains(lock.displayName) && codeLen) { // Check if the lock support reporting pinLength and it has a valid number to report (not 0 or null)
+                if ((code1?.size() > 0) && (codeLen != code1.size())) { // If we have a code to program
+                    def msg = "CODE LENGTH DOES NOT MATCH LOCK PROGRAMMING LENGTH, PROGRAMMING WILL FAIL - USER $name1 IN SLOT $i REQUIRES ${codeLen} DIGITS FOR LOCK ${lock}"
                     log.error msg
                     sendNotifications(msg)            
                 }
@@ -1891,7 +1947,7 @@ def initializeCodes() {
                         case 'Scheduled':
                         if (code != null) {
                             ('A'..'C').each { schedule ->
-                                if (settings."userDayOfWeek${schedule}${i}") {
+                                if (settings."userStartTime${schedule}${i}" && settings."userEndTime${schedule}${i}") {
                                     if (checkSchedule(user, schedule)) { // Within operating schedule
                                         if (state.programmedCodes[lock.id].contains(user as String)) {
                                             log.error "$lock scheduled user $user $name is already tracked. Schedule $schedule is scheduled to work between ${settings."userDayOfWeek${schedule}${i}"}: ${settings."userStartTime${schedule}${i}" ? (new Date(timeToday(settings."userStartTime${schedule}${i}", timeZone).time)).format("HH:mm z", timeZone) : ""} to ${settings."userEndTime${schedule}${i}" ? (new Date(timeToday(settings."userEndTime${schedule}${i}", timeZone).time)).format("HH:mm z", timeZone) : ""}"
@@ -1980,7 +2036,7 @@ def initializeCodes() {
                 }
 
                 if ((code != null) && doAdd) { // We have a code and it is not expired/within schedule, update or set the code in the slot
-                    lock.setCode(user, code)
+                    lock.hasAttribute("maxCodes") ? lock.setCode(user, code, name) : lock.setCode(user, code) // Keep support for older device handlers
                     def msg = "Requesting $lock to add $name to user $user"
                     msgs << msg
                     log.debug msg
@@ -2137,7 +2193,7 @@ def codeCheck() {
 
                             if (doAdd) {
                                 if (!state.programmedCodes[lock.id].contains(user as String)) {
-                                    lock.setCode(user, code)
+                                    lock.hasAttribute("maxCodes") ? lock.setCode(user, code, name) : lock.setCode(user, code) // Keep support for older device handlers
                                     log.debug msg
                                     if (disableRetry) {
                                         log.info "Retry programming disabled, assuming user was added successfully to the lock"
@@ -2220,7 +2276,7 @@ def codeCheck() {
                                 return // We are done here, exit out as we've scheduled the next update
                             } else if (!state.trackUsedOneTimeCodes.contains(user as String)) { // If it's not been used add it to the lock
                                 if (!state.programmedCodes[lock.id].contains(user as String)) {
-                                    lock.setCode(user, code)
+                                    lock.hasAttribute("maxCodes") ? lock.setCode(user, code, name) : lock.setCode(user, code) // Keep support for older device handlers
                                     def msg = "Requesting $lock to add one time code $name to user $user, code: $code"
                                     log.debug msg
                                     if (disableRetry) {
@@ -2267,7 +2323,7 @@ def codeCheck() {
                             def doAdd = false
                             
                             ('A'..'C').each { schedule ->
-                                if (settings."userDayOfWeek${schedule}${i}") {
+                                if (settings."userStartTime${schedule}${i}" && settings."userEndTime${schedule}${i}") {
                                     if (checkSchedule(i, schedule)) { // Check if we are within operating schedule
                                         doAdd = true
                                         def msg = "Schedule $schedule active $lock to add $name to user $user, code: $code, because it is scheduled to work between ${settings."userDayOfWeek${schedule}${i}"}: ${settings."userStartTime${schedule}${i}" ? (new Date(timeToday(settings."userStartTime${schedule}${i}", timeZone).time)).format("HH:mm z", timeZone) : ""} to ${settings."userEndTime${schedule}${i}" ? (new Date(timeToday(settings."userEndTime${schedule}${i}", timeZone).time)).format("HH:mm z", timeZone) : ""}"
@@ -2285,7 +2341,7 @@ def codeCheck() {
                                 if (state.programmedCodes[lock.id].contains(user as String)) {
                                     log.debug "$lock scheduled user $user $name is already active, not adding again"
                                 } else {
-                                    lock.setCode(user, code)
+                                    lock.hasAttribute("maxCodes") ? lock.setCode(user, code, name) : lock.setCode(user, code) // Keep support for older device handlers
                                     def msg = "Requesting $lock to add active scheduled $name to user $user, code: $code"
                                     log.debug msg
                                     if (disableRetry) {
@@ -2346,7 +2402,7 @@ def codeCheck() {
                         case 'Permanent':
                         if (code != null) {
                             if (!state.programmedCodes[lock.id].contains(user as String)) {
-                                lock.setCode(user, code)
+                                lock.hasAttribute("maxCodes") ? lock.setCode(user, code, name) : lock.setCode(user, code) // Keep support for older device handlers
                                 def msg = "Requesting $lock to add permanent code $name to user $user, code: $code"
                                 log.debug msg
                                 if (disableRetry) {
@@ -2406,7 +2462,7 @@ def codeCheck() {
                                 if (state.programmedCodes[lock.id].contains(user as String)) {
                                     log.debug "$lock presence user $user $name is already active, not adding again"
                                 } else {
-                                    lock.setCode(user, code)
+                                    lock.hasAttribute("maxCodes") ? lock.setCode(user, code, name) : lock.setCode(user, code) // Keep support for older device handlers
                                     def msg = "Requesting $lock to add presence based $name to user $user, code: $code"
                                     log.debug msg
                                     if (disableRetry) {
@@ -2466,7 +2522,7 @@ def codeCheck() {
                                 if (state.programmedCodes[lock.id].contains(user as String)) {
                                     log.debug "$lock mode user $user $name is already active, not adding again"
                                 } else {
-                                    lock.setCode(user, code)
+                                    lock.hasAttribute("maxCodes") ? lock.setCode(user, code, name) : lock.setCode(user, code) // Keep support for older device handlers
                                     def msg = "Requesting $lock to add mode based $name to user $user, code: $code"
                                     log.debug msg
                                     if (disableRetry) {
