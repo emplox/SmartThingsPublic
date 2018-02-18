@@ -21,7 +21,7 @@
 */ 
 
 def clientVersion() {
-    return "06.01.02"
+    return "07.01.00"
 }
 
 /**
@@ -30,6 +30,11 @@ def clientVersion() {
 * Copyright RBoy Apps, redistribution or reuse of code is not allowed without permission
 *
 * Change Log:
+* 2018-2-14 - (v07.01.00) Fix for ST local DTH bug in updating lock names
+* 2018-2-13 - (v07.00.01) Fix for ST error on update
+* 2018-2-13 - (v07.00.00) User can define number of retries, optimize user pages, don't rewrite all codes only those that have changed
+* 2018-2-5 - (v06.02.00) Added support for locking/unlocking locks and opening/closing garage doors for lock/unlock actions. Added support to change modes for lock actions. Door sensor is now optional for relocking with timeout
+* 2018-2-1 - (v06.01.03) Fix for ST breaking selection of Chime devices with mobile app 2.4.13
 * 2018-1-22 - (v06.01.02) When deleting a user make removing the name optional, bugfix for ST Android mobile app not refreshing page when clearing the code
 * 2018-1-21 - (v06.01.01) Added support for older device handlers to avoid a failure if users forgot to update the device handler
 * 2018-1-17 - (v06.01.00) Added support for maxCodes, codeLength, adding names to SmartLocks and other new DTH features
@@ -164,25 +169,30 @@ preferences {
     page(name: "lockManualActionsPage")
     page(name: "openCloseDoorPage")
     page(name: "scheduleCodesPage")
+    page(name: "userConfigPage")
 }
+
+private getDefaultSendDelay() { 15 }
+private getDefaultRetries() { 5 }
+private getMaxRetries() { retries == null ? defaultRetries : retries }
 
 def setupApp() {
     log.trace "$settings"
 
-    dynamicPage(name: "setupApp", title: "Lock User Management v${clientVersion()}", install: false, uninstall: true, nextPage: "usersPage") {    
+    dynamicPage(name: "setupApp", title: "Lock User Management v${clientVersion()}", install: true, uninstall: true) {    
         section("Select Lock(s)") {
             input "locks","capability.lock", title: "Lock(s)", multiple: true, submitOnChange: true, image: "http://www.rboyapps.com/images/HandleLock.png"
         }
 
-        section("How many users do you want to manage?") {
+        section("User Management") {
             def maxCodes = 0
             for (lock in locks) {
-                def lockMax = lock.hasAttribute("maxCodes") ? lock.currentValue("maxCodes") : 0
+                Integer lockMax = lock.hasAttribute("maxCodes") ? lock.currentValue("maxCodes") : 0
                 log.trace "$lock has max users: $lockMax"
-                maxCodes = maxCodes ? (lockMax ? Math.min(lockMax, maxCodes) : maxCodes) : (lockMax ?: 0) // Take the least amongst all selected locks
+                maxCodes = maxCodes ? (lockMax ? Math.min(lockMax, maxCodes) as Integer : maxCodes) : (lockMax ?: 0) // Take the least amongst all selected locks
             }
-            paragraph "Set only required number of users for optimal performance"
             input name: "maxUserNames", title: "Number of users${maxCodes ? " (1 to ${maxCodes})" : ""}", type: "number", required: true, multiple: false, image: "http://www.rboyapps.com/images/Users.png", range: "1..${maxCodes ?: 999}"
+            href(name: "users", title: "Configure users", page: "usersPage", description: "Create users and custom actions", required: false, image: "http://www.rboyapps.com/images/User.png")
         }
 
         section("General Settings") {
@@ -200,7 +210,7 @@ def setupApp() {
                 paragraph "Enable the below option if you DON'T want push notifications on your SmartThings phone app."
                 input name: "disableAllNotify", title: "Disable all push notifications", type: "bool", defaultValue: "false", required: true
             }
-            input name: "audioDevices", title: "Play notifications on these devices", type: "capability.audioNotification", required: false, multiple: true, image: "http://www.rboyapps.com/images/Horn.png"
+            input "audioDevices", "capability.audioNotification", title: "Play notifications on these devices", required: false, multiple: true, image: "http://www.rboyapps.com/images/Horn.png"
         }
 
         section() {
@@ -209,10 +219,10 @@ def setupApp() {
         }
 
         section("Code Programming Options (advanced) (optional)", hideable: true, hidden: true) {
-            paragraph "Sure-Programming: To ensure programming reliability, the app will keep trying to program until the lock confirms the programming was successful. If your lock doesn't support programming confirmation you can disable this re-verification feature"
-            input name: "disableRetry", title: "Disable re-verification", type: "bool", required: false
+            paragraph "Sure-Programming: To improve programming reliability, the app will keep trying to program the user codes until the lock confirms the programming or up to the maximum number of retries"
+            input name: "retries", title: "Maximum code programming retries", type: "number", defaultValue: "${defaultRetries}", range: "0..10", required: false
             paragraph "Change this setting if all the user codes aren't being programmed on the lock correctly. This settings determines the time gap between sending each user code to the lock. If the codes are sent too fast, they may fail to be set properly"
-            input name: "sendDelay", title: "Delay between codes (seconds):", type: "number", defaultValue: "60", required: false
+            input name: "sendDelay", title: "Delay between codes (seconds):", type: "number", defaultValue: "${defaultSendDelay}", range: "5..60", required: false
             paragraph "Enable this to get additional detailed notifications like code programming, lock responses etc. NOTE: this can generate a lot of messages"
             input name: "detailedNotifications", title: "Get detailed notifications", type: "bool", defaultValue: "false", required: false
         }
@@ -236,7 +246,7 @@ def openCloseDoorPage() {
                 paragraph "\r\n"
                 paragraph title: "Configure ${lock}", required: true, ""
                 if (priorRelockDoor || priorRetractDeadbolt || priorNotifyOpen || priorNotifyBeep) {
-                    input "sensor${lock}", "capability.contactSensor", title: "Door open/close sensor", required: true
+                    input "sensor${lock}", "capability.contactSensor", title: "Door open/close sensor", required: ( priorRelockImmediate || priorRetractDeadbolt || priorNotifyOpen || priorNotifyBeep ? true : false) // required for deadbolt, immediate relock or notifications
                 }
 
                 // Sanity check do not offer AutoLock is hardware autoLock is engaged
@@ -257,7 +267,7 @@ def openCloseDoorPage() {
                     input name: "retractDeadbolt${lock}", type: "bool", title: "Unlock door if locked while open", defaultValue: priorRetractDeadbolt, description: "This retracts the deadbolt if it extends while the door is still open", required: false, submitOnChange: true
                 }
 
-                input name: "openNotifyBeep${lock}", type: "capability.tone", title: "Ring chime when door is opened", multiple: true, required: false, submitOnChange: true
+                input "openNotifyBeep${lock}", "capability.tone", title: "Ring chime when door is opened", multiple: true, required: false, submitOnChange: true
                 input name: "openNotify${lock}", type: "bool", title: "Notify if door has been left open", defaultValue: priorNotifyOpen, required: false, submitOnChange: true
                 if (priorNotifyOpen) {
                     input name: "openNotifyTimeout${lock}", type: "number", title: "...for (minutes)", defaultValue: priorNotifyOpenTimeout, required: true, range: "1..*"
@@ -301,8 +311,8 @@ def unlockLockActionsPage(params) {
         }
         section {
             if (user) { // User specific override options
-                paragraph "Enabling user specific actions and notifications will override over the general actions defined on the first page"
-                input "userOverrideUnlockActions${user}", "bool", title: "Define specific actions for $name", required: true,  submitOnChange: true
+                paragraph "Enabling custom user actions and notifications will override over the general actions defined on the first page"
+                input "userOverrideUnlockActions${user}", "bool", title: "Define custom actions for $name", required: true,  submitOnChange: true
                 if (!settings."userOverrideUnlockActions${user}") { // Check if user has enabled specific override actions then show menu
                     showActions = false
                 }
@@ -390,6 +400,8 @@ def unlockKeypadActionsPage(params) {
             input "turnOnSwitchesAfterSunset${lock}${user}", "capability.switch", title: "Turn on light(s) after dark", required: false, multiple: true
             input "turnOnSwitches${lock}${user}", "capability.switch", title: "Turn on switch(s)", required: false, multiple: true
             input "turnOffSwitches${lock}${user}", "capability.switch", title: "Turn off switch(s)", required: false, multiple: true
+            input "unlockLocks${lock}${user}","capability.lock", title: "Unlock lock(s)", required: false, multiple: true
+            input "openGarage${lock}${user}","capability.garageDoorControl", title: "Open garage door(s)", required: false, multiple: true
 
             paragraph title: "Do NOT run the above unlock actions for door${lock ? " $lock" : ""} under any of the following conditions", required: true, ""
             input "runXPeopleUnlockActions${lock}${user}", "capability.presenceSensor", title: "...when any these people are present", required: false, multiple: true
@@ -437,6 +449,8 @@ def unlockManualActionsPage(params) {
             input "turnOnSwitchesAfterSunsetManual${lock}", "capability.switch", title: "Turn on light(s) after dark", required: false, multiple: true
             input "turnOnSwitchesManual${lock}", "capability.switch", title: "Turn on switch(s)", required: false, multiple: true
             input "turnOffSwitchesManual${lock}", "capability.switch", title: "Turn off switch(s)", required: false, multiple: true
+            input "unlockLocksManual${lock}","capability.lock", title: "Unlock lock(s)", required: false, multiple: true
+            input "openGarageManual${lock}","capability.garageDoorControl", title: "Open garage door(s)", required: false, multiple: true
 
             paragraph title: "Do NOT run the above unlock actions for door${lock ? " $lock" : ""} under any of the following conditions", required: true, ""
             input "runXPeopleUnlockActionsManual${lock}", "capability.presenceSensor", title: "...when any these people are present", required: false, multiple: true
@@ -485,12 +499,17 @@ def lockKeypadActionsPage(params) {
 
         section ("Door Keypad Lock Actions${lock ? " for $lock" : ""}") {
             def priorLockPhrase = settings."externalLockPhrase${lock}${user}"
+            def priorHomeMode = settings."externalLockMode${lock}${user}"
 
             paragraph "Some locks can be locked from the keypad outside${user ? " with user codes" : ""}. If your lock has his feature then you can assign actions to execute when it is locked ${user ? "with a user code" : "from the keypad"}"
             input "externalLockPhrase${lock}${user}", "enum", title: "Run routine", required: false, options: phrases, defaultValue: priorLockPhrase
+            input "externalLockMode${lock}${user}", "mode", title: "Change mode to", required: false, multiple: false, defaultValue: priorHomeMode
             input "homeArm${lock}${user}", "bool", title: "Arm Smart Home Monitor to Away", required: false
             input "externalLockTurnOnSwitches${lock}${user}", "capability.switch", title: "Turn on switch(s)", required: false, multiple: true
             input "externalLockTurnOffSwitches${lock}${user}", "capability.switch", title: "Turn off switch(s)", required: false, multiple: true
+            input "lockLocks${lock}${user}","capability.lock", title: "Lock lock(s)", required: false, multiple: true
+            input "closeGarage${lock}${user}","capability.garageDoorControl", title: "Close garage door(s)", required: false, multiple: true
+
             input "delayLockActions${lock}${user}", "bool", title: "Delay running lock actions", required: false, submitOnChange: true
             if (settings."delayLockActions${lock}${user}") {
                 input name: "delayLockActionsTime${lock}${user}", type: "number", title: "...by (minutes)", defaultValue: settings."delayLockActionsTime${lock}${user}", required: true, range: "1..*"
@@ -544,11 +563,16 @@ def lockManualActionsPage(params) {
 
         section ("Door Manual Lock Actions${lock ? " for $lock" : ""}") {
             def priorLockPhrase = settings."externalLockPhraseManual${lock}"
+            def priorHomeMode = settings."externalLockModeManual${lock}"
 
             input "externalLockPhraseManual${lock}", "enum", title: "Run routine", required: false, options: phrases, defaultValue: priorLockPhrase
+            input "externalLockModeManual${lock}", "mode", title: "Change mode to", required: false, multiple: false, defaultValue: priorHomeMode
             input "homeArmManual${lock}", "bool", title: "Arm Smart Home Monitor to Home", required: false
             input "externalLockTurnOnSwitchesManual${lock}", "capability.switch", title: "Turn on switch(s)", required: false, multiple: true
             input "externalLockTurnOffSwitchesManual${lock}", "capability.switch", title: "Turn off switch(s)", required: false, multiple: true
+            input "lockLocksManual${lock}","capability.lock", title: "Lock lock(s)", required: false, multiple: true
+            input "closeGarageManual${lock}","capability.garageDoorControl", title: "Close garage door(s)", required: false, multiple: true
+
             input "delayLockActionsManual${lock}", "bool", title: "Delay running lock actions", required: false, submitOnChange: true
             if (settings."delayLockActionsManual${lock}") {
                 input name: "delayLockActionsTimeManual${lock}", type: "number", title: "...by (minutes)", defaultValue: settings."delayLockActionsTimeManual${lock}", required: true, range: "1..*"
@@ -569,8 +593,14 @@ def lockManualActionsPage(params) {
 
 
 def usersPage() {
-    dynamicPage(name:"usersPage", title: "User Names, Codes and Notification Setup", uninstall: true, install: true) {
+    dynamicPage(name:"usersPage", title: "User Names, Codes and Notification Setup", uninstall: false, install: false) {
 
+        if (!settings.maxUserNames) {
+            section("Invalid number of users") {
+                paragraph title: "First configure the number of users on the previous page", required: true, ""
+            }
+        }
+        
         TimeZone timeZone = location.timeZone
         if (!timeZone) {
             timeZone = TimeZone.getDefault()
@@ -608,7 +638,225 @@ def usersPage() {
         }
         log.trace "Configured lock fixed code length: $pinLen, max code length: $maxPinLen, min code length: $minPinLen"
 
-        for (int i = 1; i <= settings.maxUserNames; i++) {
+        section() {
+            for (int i = 1; i <= settings.maxUserNames; i++) {
+                def priorName = settings."userNames${i}"
+                def priorCode = settings."userCodes${i}"
+                def priorNotify = settings."userNotify${i}"
+                def priorNotifyModes = settings."userNotifyModes${i}"
+                def priorExpireDate = settings."userExpireDate${i}"
+                def priorExpireTime = settings."userExpireTime${i}"
+                def priorStartDate = settings."userStartDate${i}"
+                def priorStartTime = settings."userStartTime${i}"
+                def priorUserType = settings."userType${i}"
+                def priorLocks = settings."userLocks${i}"
+                def invalidStartDate = false
+                def invalidExpiryDate = false
+                def userSummary = ""
+                def userSlotActive = true
+                //log.trace "Initial $i Name: $priorName, Code: $priorCode, Notify: $priorNotify, NotifyModes: $priorNotifyModes, ExpireDate: $priorExpireDate, ExpireTime: $priorExpireTime, StartDate: $priorStartDate, StartTime: $priorStartTime, UserType: $priorUserType, Locks: $priorLocks"
+
+                // Check for errors and display messages
+                if (pinLenError) {
+                    def msg = "YOUR LOCKS ARE CONFIGURED TO ACCEPT DIFFERENT CODE DIGIT LENGTHS, PROGRAMMING WILL FAIL!"
+                    paragraph title: msg, required: true, ""
+                }
+
+                if (priorCode) { // Do all the checks only if user has been configured
+                    // Sanity check, codes cannot be reused in the same lock (codes have to be unique to the same slot
+                    for (int j = 1; j <= settings.maxUserNames; j++) {
+                        if (priorCode && (i != j) && (priorCode == settings."userCodes${j}")) {
+                            def msg = "CHANGE CODE - THIS CODE HAS BEEN USED FOR USER $j"
+                            log.warn "CHANGE CODE FOR USER $i - THIS CODE HAS BEEN USED FOR USER $j"
+                            userSummary += (userSummary ? "\n" : "") + msg
+                        }
+                    }
+
+                    // Check if the user has entered a non digit string
+                    if ((priorCode?.size() > 0) && !priorCode?.isNumber()) {
+                        def msg = "WARNING: CODE IS NOT A NUMBER, PROGRAMMING WILL FAIL!"
+                        log.warn msg
+                        userSummary += (userSummary ? "\n" : "") + msg
+                    }
+
+                    // Check if the lock pin code length match the pin code length entered by the user
+                    def userLocks = settings."userLocks${i}" ?: locks*.displayName // Use the defined locks or if not defined then check all locks
+                    for (lock in locks) {
+                        def codeLen = lock.hasAttribute("pinLength") ? lock.currentValue("pinLength") : (lock.hasAttribute("codeLength") ? lock.currentValue("codeLength") : null)
+                        if (userLocks?.contains(lock.displayName) && codeLen) { // Check if the lock support reporting pinLength and it has a valid number to report (not 0 or null)
+                            if ((priorCode?.size() > 0) && (codeLen != priorCode.size())) { // If we have a code to program
+                                def msg = "YOUR LOCK IS CONFIGURED TO ACCEPT ${codeLen} DIGIT CODES ONLY, PROGRAMMING WILL FAIL!"
+                                log.warn msg
+                                userSummary += (userSummary ? "\n" : "") + msg
+                            }
+                        }
+                    }
+
+                    // Sanity check for expiration date formats
+                    switch (priorUserType) {
+                        case 'Expire on':
+                            if (priorStartDate) {
+                                //log.trace "Found start date in setup"
+                                try {
+                                    String dst = timeZone.getDisplayName(timeZone.inDaylightTime(new Date(now())), TimeZone.SHORT) // Keep current timezone
+                                    def df = new java.text.SimpleDateFormat("yyyy-MM-dd Z")     
+                                    df.setLenient(false) // we want strict formatting
+                                    df.parse(priorStartDate + " " + dst)
+                                    invalidStartDate = false
+                                }
+                                catch (Exception e) {
+                                    log.warn "Invalid start date for user $i"
+                                    invalidStartDate = true
+                                }
+                            }
+                            if (priorExpireDate) {
+                                //log.trace "Found expiry date in setup"
+                                try {
+                                    String dst = timeZone.getDisplayName(timeZone.inDaylightTime(new Date(now())), TimeZone.SHORT) // Keep current timezone
+                                    def df = new java.text.SimpleDateFormat("yyyy-MM-dd Z")     
+                                    df.setLenient(false) // we want strict formatting
+                                    df.parse(priorExpireDate + " " + dst)
+                                    invalidExpiryDate = false // We passed it's a valid date
+                                }
+                                catch (Exception e) {
+                                    log.warn "Invalid expiry date for user $i"
+                                    invalidExpiryDate = true
+                                }
+                            }
+
+                            if (!invalidExpiryDate && !invalidStartDate) {
+                                if (priorExpireDate) {
+                                    def expired = false
+                                    if (priorExpireTime) {
+                                        def midnightToday = timeToday("2000-01-01T00:00:00.000-0000", timeZone)
+                                        String dst = timeZone.getDisplayName(timeZone.inDaylightTime(new Date(now())), TimeZone.SHORT) // Keep current timezone
+                                        def expT = (timeToday(priorExpireTime, timeZone).time - midnightToday.time)
+                                        def expD = Date.parse("yyyy-MM-dd Z", priorExpireDate + " " + dst).toCalendar()
+                                        def exp = expD.getTimeInMillis() + expT
+                                        if (exp < now()) {
+                                            def msg = "Code EXPIRED!"
+                                            userSummary += (userSummary ? "\n" : "") + msg
+                                            expired = true
+                                            userSlotActive = false
+                                        } else {
+                                            if (priorStartDate && !expired) {
+                                                def sD = Date.parse("yyyy-MM-dd Z", priorStartDate + " " + dst).toCalendar()
+                                                def sT = (timeToday(priorStartTime, timeZone).time - midnightToday.time)
+                                                def sta = sD.getTimeInMillis() + sT
+                                                if (sta > now()) {                                                
+                                                    def msg = "Activates on ${sD.format("EEE MMM dd yyyy")}"
+                                                    userSummary += (userSummary ? "\n" : "") + msg
+                                                }
+                                            }
+                                            def msg = "Expires on ${expD.format("EEE MMM dd yyyy")}"
+                                            userSummary += (userSummary ? "\n" : "") + msg
+                                        }
+                                    }
+                                }
+                            } else {
+                                def msg = "EXPIRY: INVALID Date!"
+                                userSummary += (userSummary ? "\n" : "") + msg
+                                userSlotActive = false
+                            }
+                            break
+
+                        case 'One time':
+                            if (state.trackUsedOneTimeCodes?.contains(i as String)) {
+                                def msg = "One time code USED!"
+                                userSummary += (userSummary ? "\n" : "") + msg
+                                userSlotActive = false
+                            }
+                            break
+
+                        case 'Scheduled':
+                        	if (!(('A'..'C').any { schedule -> settings."userDayOfWeek${schedule}${i}" })) { // If no schedules are defined
+                                def msg = "No schedule defined!"
+                                userSummary += (userSummary ? "\n" : "") + msg
+                                userSlotActive = false
+                            }
+                        	break
+                            
+                        case 'Presence':
+                        	if (!(settings."userPresent${i}" || settings."userNotPresent${i}")) { // No conditions is specified
+                                def msg = "No presence defined!"
+                                userSummary += (userSummary ? "\n" : "") + msg
+                                userSlotActive = false
+                            }
+                            break
+                        
+                        case 'Inactive':
+                        	userSlotActive = false
+                        	break
+                            
+                        default:
+                            break
+                    }
+                    
+                    if (!userSummary) { // If there are no messages or warnings then indicate user type
+                        userSummary += priorUserType
+                    }
+                } else { // Not configured
+                    userSlotActive = false
+                }
+
+                // Params for user
+                def hrefParams = [
+                    user: i as String,
+                    pinLen: pinLen,
+                    maxPinLen: maxPinLen,
+                    minPinLen: minPinLen,
+                    passed: true 
+                ]
+                href(name: "userConfig${i}", params: hrefParams, title: "${priorCode ? priorName : "< blank >"}", page: "userConfigPage", description: userSummary, required: false, image: (userSlotActive ? "http://www.rboyapps.com/images/User.png" : "http://www.rboyapps.com/images/UserInactive.png"))
+            }
+        } 
+    } 
+}
+
+def userConfigPage(params) {
+    //  params is broken, after doing a submitOnChange on this page, params is lost. So as a work around when this page is called with params save it to state and if the page is called with no params we know it's the bug and use the last state instead
+    if (params.passed) {
+        atomicState.params = params // We got something, so save it otherwise it's a page refresh for submitOnChange
+    }
+
+    def user = ""
+    def pinLen = ""
+    def maxPinLen = ""
+    def minPinLen = ""
+    // Get user from the passed in params when the page is loading, else get from the last saved to work around not having params on pages
+    if (params.user) {
+        user = params.user ?: ""
+        pinLen = params.pinLen ?: ""
+        maxPinLen = params.maxPinLen ?: ""
+        minPinLen = params.minPinLen ?: ""
+        log.trace "Passed from main page, using params lookup for user:$user, pinLen:$pinLen, maxPinLen:$maxPinLen, minPinLen:$minPinLen"
+    } else if (atomicState.params) {
+        user = atomicState.params.user ?: ""
+        pinLen = atomicState.params.pinLen ?: ""
+        maxPinLen = atomicState.params.maxPinLen ?: ""
+        minPinLen = atomicState.params.minPinLen ?: ""
+        log.trace "Passed from submitOnChange, atomicState lookup for user:$user, pinLen:$pinLen, maxPinLen:$maxPinLen, minPinLen:$minPinLen"
+    } else {
+        log.error "Invalid params, no user found. Params: $params, saved params: $atomicState.params"
+    }
+    
+    def name = user ? settings."userNames${user}" : ""
+    def i = user as Integer
+
+    log.trace "User Codes Page, user:$user, name:$name, passed params: $params, saved params:$atomicState.params"
+
+    dynamicPage(name:"userConfigPage", title: "User Management Slot #${i}", uninstall: false, install: false) {
+        TimeZone timeZone = location.timeZone
+        if (!timeZone) {
+            timeZone = TimeZone.getDefault()
+            log.error "Hub location/timezone not set, using ${timeZone.getDisplayName()} timezone. Please set Hub location and timezone for the codes to work accurately"
+            sendPush "Hub location/timezone not set, using ${timeZone.getDisplayName()} timezone. Please set Hub location and timezone for the codes to work accurately"
+            section("INVALID HUB LOCATION") {
+                paragraph title: "Hub location/timezone not set, using ${timeZone.getDisplayName()} timezone. Please set Hub location and timezone for the codes to work accurately", required: true, ""
+            }
+        }
+
+        section() {
             def priorName = settings."userNames${i}"
             def priorCode = settings."userCodes${i}"
             def priorNotify = settings."userNotify${i}"
@@ -621,69 +869,70 @@ def usersPage() {
             def priorLocks = settings."userLocks${i}"
             def invalidStartDate = false
             def invalidExpiryDate = false
-            log.debug "Initial $i Name: $priorName, Code: $priorCode, Notify: $priorNotify, NotifyModes: $priorNotifyModes, ExpireDate: $priorExpireDate, ExpireTime: $priorExpireTime, StartDate: $priorStartDate, StartTime: $priorStartTime, UserType: $priorUserType, Locks: $priorLocks"
+            log.trace "Initial $i Name: $priorName, Code: $priorCode, Notify: $priorNotify, NotifyModes: $priorNotifyModes, ExpireDate: $priorExpireDate, ExpireTime: $priorExpireTime, StartDate: $priorStartDate, StartTime: $priorStartTime, UserType: $priorUserType, Locks: $priorLocks"
 
             // Check for errors and display messages
-            section("User Management Slot #${i}") {
+            if (pinLenError) {
+                def msg = "YOUR LOCKS ARE CONFIGURED TO ACCEPT DIFFERENT CODE DIGIT LENGTHS, PROGRAMMING WILL FAIL!"
+                paragraph title: msg, required: true, ""
+            }
 
-                if (pinLenError) {
-                    def msg = "YOUR LOCKS ARE CONFIGURED TO ACCEPT DIFFERENT CODE DIGIT LENGTHS, PROGRAMMING WILL FAIL!"
+            if (priorCode) { // Do all the checks only if user has been configured
+                // Sanity check, codes cannot be reused in the same lock (codes have to be unique to the same slot
+                for (int j = 1; j <= settings.maxUserNames; j++) {
+                    if (priorCode && (i != j) && (priorCode == settings."userCodes${j}")) {
+                        log.warn "CHANGE CODE FOR USER $i - THIS CODE HAS BEEN USED FOR USER $j"
+                        paragraph title: "CHANGE CODE - THIS CODE HAS BEEN USED FOR USER $j", required: true, ""
+                    }
+                }
+
+                // Check if the user has entered a non digit string
+                if ((priorCode?.size() > 0) && !priorCode?.isNumber()) {
+                    def msg = "WARNING: CODE IS NOT A NUMBER, PROGRAMMING WILL FAIL!"
                     paragraph title: msg, required: true, ""
                 }
 
-                if (settings."userNames${i}") { // Do all the checks only if user has been configured
-                    // Sanity check, codes cannot be reused in the same lock (codes have to be unique to the same slot
-                    for (int j = 1; j <= settings.maxUserNames; j++) {
-                        if (priorCode && (i != j) && (priorCode == settings."userCodes${j}")) {
-                            log.warn "CHANGE CODE FOR USER $i - THIS CODE HAS BEEN USED FOR USER $j"
-                            paragraph title: "CHANGE CODE - THIS CODE HAS BEEN USED FOR USER $j", required: true, ""
+                // Check if the lock pin code length match the pin code length entered by the user
+                def userLocks = settings."userLocks${i}" ?: locks*.displayName // Use the defined locks or if not defined then check all locks
+                for (lock in locks) {
+                    def codeLen = lock.hasAttribute("pinLength") ? lock.currentValue("pinLength") : (lock.hasAttribute("codeLength") ? lock.currentValue("codeLength") : null)
+                    if (userLocks?.contains(lock.displayName) && codeLen) { // Check if the lock support reporting pinLength and it has a valid number to report (not 0 or null)
+                        if ((priorCode?.size() > 0) && (codeLen != priorCode.size())) { // If we have a code to program
+                            def msg = "YOUR LOCK IS CONFIGURED TO ACCEPT ${codeLen} DIGIT CODES ONLY, PROGRAMMING WILL FAIL!"
+                            paragraph title: msg, required: true, ""
                         }
                     }
+                }
 
-                    // Check if the user has entered a non digit string
-                    if ((priorCode?.size() > 0) && !priorCode?.isNumber()) {
-                        def msg = "WARNING: CODE IS NOT A NUMBER, PROGRAMMING WILL FAIL!"
-                        paragraph title: msg, required: true, ""
-                    }
-
-                    // Check if the lock pin code length match the pin code length entered by the user
-                    def userLocks = settings."userLocks${i}" ?: locks*.displayName // Use the defined locks or if not defined then check all locks
-                    for (lock in locks) {
-                        def codeLen = lock.hasAttribute("pinLength") ? lock.currentValue("pinLength") : (lock.hasAttribute("codeLength") ? lock.currentValue("codeLength") : null)
-                        if (userLocks?.contains(lock.displayName) && codeLen) { // Check if the lock support reporting pinLength and it has a valid number to report (not 0 or null)
-                            if ((priorCode?.size() > 0) && (codeLen != priorCode.size())) { // If we have a code to program
-                                def msg = "YOUR LOCK IS CONFIGURED TO ACCEPT ${codeLen} DIGIT CODES ONLY, PROGRAMMING WILL FAIL!"
-                                paragraph title: msg, required: true, ""
-                            }
-                        }
-                    }
-
-                    // Sanity check for expiration date formats
-                    switch (priorUserType) {
-                        case 'Expire on':
-
-                        if (priorExpireDate) {
-                            log.debug "Found expiry date in setup"
-                            try {
-                                String dst = timeZone.getDisplayName(timeZone.inDaylightTime(new Date(now())), TimeZone.SHORT) // Keep current timezone
-                                log.debug Date.parse("yyyy-MM-dd Z", priorExpireDate + " " + dst) // groovy is very lenient with invalid date strings, so lets to to shore it up as much as possible
-                                invalidExpiryDate = false // We passed it's a valid date
-                            }
-                            catch (Exception e) {
-                                log.debug "Invalid expiry date in setup"
-                                invalidExpiryDate = true
-                            }
-                        }
+                // Sanity check for expiration date formats
+                switch (priorUserType) {
+                    case 'Expire on':
                         if (priorStartDate) {
-                            log.debug "Found start date in setup"
+                            //log.trace "Found start date in setup"
                             try {
                                 String dst = timeZone.getDisplayName(timeZone.inDaylightTime(new Date(now())), TimeZone.SHORT) // Keep current timezone
-                                Date.parse("yyyy-MM-dd Z", priorStartDate + " " + dst) // groovy is very lenient with invalid date strings, so lets to to shore it up as much as possible
+                                def df = new java.text.SimpleDateFormat("yyyy-MM-dd Z")     
+                                df.setLenient(false) // we want strict formatting
+                                log.trace "Start:" + df.parse(priorStartDate + " " + dst)
                                 invalidStartDate = false
                             }
                             catch (Exception e) {
-                                log.debug "Invalid start date in setup"
+                                log.warn "Invalid start date in setup"
                                 invalidStartDate = true
+                            }
+                        }
+                        if (priorExpireDate) {
+                            //log.trace "Found expiry date in setup"
+                            try {
+                                String dst = timeZone.getDisplayName(timeZone.inDaylightTime(new Date(now())), TimeZone.SHORT) // Keep current timezone
+                                def df = new java.text.SimpleDateFormat("yyyy-MM-dd Z")     
+                                df.setLenient(false) // we want strict formatting
+                                log.trace "Expire:" + df.parse(priorExpireDate + " " + dst)
+                                invalidExpiryDate = false // We passed it's a valid date
+                            }
+                            catch (Exception e) {
+                                log.warn "Invalid expiry date in setup"
+                                invalidExpiryDate = true
                             }
                         }
 
@@ -696,105 +945,116 @@ def usersPage() {
                                     def expT = (timeToday(priorExpireTime, timeZone).time - midnightToday.time)
                                     def expD = Date.parse("yyyy-MM-dd Z", priorExpireDate + " " + dst).toCalendar()
                                     def exp = expD.getTimeInMillis() + expT
-                                    def expStr = (new Date(exp.value)).format("EEE MMM dd yyyy HH:mm z", timeZone)
                                     if (exp < now()) {
                                         paragraph title: "Code EXPIRED!", required: true, ""
                                         expired = true
                                     } else {
-                                        paragraph title: "Code will expire on ${expStr}", required: true, ""
+                                        if (priorStartDate && !expired) {
+                                            def sD = Date.parse("yyyy-MM-dd Z", priorStartDate + " " + dst).toCalendar()
+                                            def sT = (timeToday(priorStartTime, timeZone).time - midnightToday.time)
+                                            def sta = sD.getTimeInMillis() + sT
+                                            if (sta > now()) {                                                
+                                                def staStr = (new Date(sta.value)).format("EEE MMM dd yyyy HH:mm z", timeZone)
+                                                paragraph title: "Code activates on ${staStr}", required: true, ""
+                                            }
+                                        }
                                     }
-                                }
-                                if (priorStartDate && !expired) {
-                                    def sd = Date.parse("yyyy-MM-dd", priorStartDate)
-                                    paragraph title: "Code will be active on ${sd.format("EEE MMM dd yyyy")}", required: true, ""
                                 }
                             }
                         }
                         break
 
-                        case 'One time':
+                    case 'One time':
                         if (state.trackUsedOneTimeCodes?.contains(i as String)) {
                             paragraph title: "One time code USED!", required: true, ""
                         }
                         break
 
-                        default:
-                            break
-                    }
-                }
-
-                // User and code details/types
-                input "userNames${i}", "text", description: "Tap to set", title: "Name", multiple: false, required: (settings."userCodes${i}" ? true : false), submitOnChange: false, image: "http://www.rboyapps.com/images/User.png"
-                input "userCodes${i}", "text", description: "Tap to set", title: "Code${pinLen ? " (${pinLen} digits)" : ((minPinLen && maxPinLen) ? " (${minPinLen}-${maxPinLen} digits)" : "")}", multiple: false, required: false, submitOnChange: true, image: "http://www.rboyapps.com/images/Code.png" // Input it type text otherwise users can't enter the number starting with 0
-
-                if (priorName) {
-                    // Lock selection
-                    if (locks?.size() > 1) {
-                        input "userLocks${i}", "enum", description: "Select locks", title: "Only on these lock(s) (optional)", options: (locks*.displayName).sort(), multiple: true, required: false, image: "http://www.rboyapps.com/images/HandleLock.png"
-                    }
-
-                    // User Type (Permanent, One Time, Scheduled, etc)
-                    input "userType${i}", "enum", title: "Select User Type", required: true, multiple: false, options: codeOptions(), defaultValue: 'Permanent', submitOnChange: true, image: "http://www.rboyapps.com/images/Schedule.png"
-
-                    // Expiration/Scheduling options
-                    switch (priorUserType) {
-                        case 'Expire on':
-                        if (invalidStartDate == true) {
-                            paragraph title: "INVALID START DATE - PLEASE CHECK YOUR DATE FORMAT", required: true, ""
-                        }
-                        input "userStartDate${i}", "date", title: "...code start date (YYYY-MM-DD) (optional)", description: "Date on which the code should be enabled", required: false,  submitOnChange: true
-                        if (priorStartDate) {
-                            input "userStartTime${i}", "time", title: "...code start time", description: "The code would be enabled within 5 minutes of this time", required: true,  submitOnChange: true
-                        }
-                        if (invalidExpiryDate == true) {
-                            paragraph title: "INVALID EXPIRY DATE - PLEASE CHECK YOUR DATE FORMAT", required: true, ""
-                        }
-                        input "userExpireDate${i}", "date", title: "...code expiration date (YYYY-MM-DD)", description: "Date on which the code should be deleted", required: true, submitOnChange: true
-                        input "userExpireTime${i}", "time", title: "...code expiration time", description: "The code would be deleted within 5 minutes of this time", required: true, submitOnChange: true
+                    default:
                         break
-
-                        case 'Scheduled':
-                        // 3 schedule options for each user
-                        ('A'..'C').each { schedule ->
-                            def hrefParams = [
-                                user: i as String,
-                                schedule: schedule,
-                                passed: true
-                            ]
-                            href(name: "schedule${schedule}", params: hrefParams, title: "...click here to define schedule ${schedule}", page: "scheduleCodesPage", description: (settings."userDayOfWeek${schedule}${i}" ? "${settings."userDayOfWeek${schedule}${i}"}: ${settings."userStartTime${schedule}${i}" ? (new Date(timeToday(settings."userStartTime${schedule}${i}", timeZone).time)).format("HH:mm z", timeZone) : ""} - ${settings."userEndTime${schedule}${i}" ? (new Date(timeToday(settings."userEndTime${schedule}${i}", timeZone).time)).format("HH:mm z", timeZone) : ""}" : "Not defined"), required: false)
-                        }
-                        break
-
-                        case 'Presence':
-                        input "userPresent${i}", "capability.presenceSensor", title: "...if any these people are present", description: "Code should be active when any of these people are present", required: false, multiple: true
-                        input "userNotPresent${i}", "capability.presenceSensor", title: "...and none of these people are present", description: "and all these people are not present", required: false, multiple: true
-                        break
-
-                        case 'Modes':
-                        input "userModes${i}", "mode", title: "...when in this mode(s)", description: "Code should be active only during these modes", required: true, multiple: true
-                        break
-
-                        default:
-                            break
-                    }
-
-                    // Notifications for each user
-                    input "userNotify${i}", "bool", title: "Notify on use", defaultValue: true, required: false, submitOnChange: true, image: "http://www.rboyapps.com/images/Notifications.png"
-                    if (settings."userNotify${i}") {
-                        input "userNotifyModes${i}", "mode", title: "...only when in this mode(s)", description: "Notify only when in any of these modes", required: false, multiple: true
-                        input "userXNotifyPresence${i}", "capability.presenceSensor", title: "...and when these people are not present", description: "and none of these people are present", required: false, multiple: true
-                    }
-
-                    // Unlock actions for each user
-                    def hrefParams = [
-                        user: i as String, 
-                        passed: true 
-                    ]
-                    href(name: "unlockLockActions", params: hrefParams, title: "Custom lock/unlock actions for ${settings."userNames${i}"}", page: "unlockLockActionsPage", description: "", required: false, image: "http://www.rboyapps.com/images/LockUnlock.png")
                 }
             }
-        } 
-    } 
+
+            // User and code details/types
+            input "userNames${i}", "text", description: "Tap to set", title: "Name", multiple: false, required: (settings."userCodes${i}" ? true : false), submitOnChange: false, image: "http://www.rboyapps.com/images/User.png"
+            input "userCodes${i}", "text", description: "Tap to set", title: "Code${pinLen ? " (${pinLen} digits)" : ((minPinLen && maxPinLen) ? " (${minPinLen}-${maxPinLen} digits)" : "")}", multiple: false, required: false, submitOnChange: true, image: "http://www.rboyapps.com/images/Code.png" // Input it type text otherwise users can't enter the number starting with 0
+
+            // Lock selection
+            if (locks?.size() > 1) {
+                input "userLocks${i}", "enum", description: "Select locks", title: "Only on these lock(s) (optional)", options: (locks*.displayName).sort(), multiple: true, required: false, image: "http://www.rboyapps.com/images/HandleLock.png"
+            }
+
+            // User Type (Permanent, One Time, Scheduled, etc)
+            input "userType${i}", "enum", title: "Select User Type", required: true, multiple: false, options: codeOptions(), defaultValue: 'Permanent', submitOnChange: true, image: "http://www.rboyapps.com/images/Schedule.png"
+
+            // Expiration/Scheduling options
+            switch (priorUserType) {
+                case 'Expire on':
+                    if (invalidStartDate == true) {
+                        paragraph title: "INVALID START DATE - PLEASE CHECK YOUR DATE FORMAT", required: true, ""
+                    }
+                    input "userStartDate${i}", "date", title: "...code start date (YYYY-MM-DD) (optional)", description: "Date on which the code should be enabled", required: false,  submitOnChange: true
+                    if (priorStartDate) {
+                        input "userStartTime${i}", "time", title: "...code start time", description: "The code would be enabled within 2 minutes of this time", required: true,  submitOnChange: false
+                    }
+                    if (invalidExpiryDate == true) {
+                        paragraph title: "INVALID EXPIRY DATE - PLEASE CHECK YOUR DATE FORMAT", required: true, ""
+                    }
+                    input "userExpireDate${i}", "date", title: "...code expiration date (YYYY-MM-DD)", description: "Date on which the code should be deleted", required: true, submitOnChange: true
+                    input "userExpireTime${i}", "time", title: "...code expiration time", description: "The code would be deleted within 2 minutes of this time", required: true, submitOnChange: false
+                    break
+
+                case 'Scheduled':
+                    // 3 schedule options for each user
+                    ('A'..'C').each { schedule ->
+                        def hrefParams = [
+                            user: i as String,
+                            schedule: schedule,
+                            passed: true
+                        ]
+                        href(name: "schedule${schedule}", params: hrefParams, title: "...click here to define schedule ${schedule}", page: "scheduleCodesPage", description: getUserScheduleDescription(i, schedule, timeZone), required: false)
+                    }
+                    break
+
+                case 'Presence':
+                    input "userPresent${i}", "capability.presenceSensor", title: "...if any these people are present", description: "Code should be active when any of these people are present", required: false, multiple: true
+                    input "userNotPresent${i}", "capability.presenceSensor", title: "...and none of these people are present", description: "and all these people are not present", required: false, multiple: true
+                    break
+
+                case 'Modes':
+                    input "userModes${i}", "mode", title: "...when in this mode(s)", description: "Code should be active only during these modes", required: true, multiple: true
+                    break
+
+                default:
+                    break
+            }
+
+            // Notifications for each user
+            input "userNotify${i}", "bool", title: "Notify on use", defaultValue: true, required: false, submitOnChange: true, image: "http://www.rboyapps.com/images/Notifications.png"
+            if (settings."userNotify${i}") {
+                input "userNotifyModes${i}", "mode", title: "...only when in this mode(s)", description: "Notify only when in any of these modes", required: false, multiple: true
+                input "userXNotifyPresence${i}", "capability.presenceSensor", title: "...and when these people are not present", description: "and none of these people are present", required: false, multiple: true
+            }
+
+            // Unlock actions for each user
+            def hrefParams = [
+                user: i as String, 
+                passed: true 
+            ]
+            href(name: "unlockLockActions", params: hrefParams, title: "Custom actions for lock/unlock", page: "unlockLockActionsPage", description: settings."userOverrideUnlockActions${user}" ? "Configured" : "", required: false, image: "http://www.rboyapps.com/images/LockUnlock.png")
+        }
+    }
+}
+
+private getUserScheduleDescription(i, schedule, timeZone) {
+    def retVal = "Not defined"
+    if (settings."userDayOfWeek${schedule}${i}") {
+        retVal = ""
+        settings."userDayOfWeek${schedule}${i}".each { retVal += (retVal ? ", " : "") + it }// DOW
+        retVal += ": " + (settings."userStartTime${schedule}${i}" ? (new Date(timeToday(settings."userStartTime${schedule}${i}", timeZone).time)).format("HH:mm z", timeZone) : "") // Start Time
+        retVal += " - " + (settings."userEndTime${schedule}${i}" ? (new Date(timeToday(settings."userEndTime${schedule}${i}", timeZone).time)).format("HH:mm z", timeZone) : "") // EndTime
+    }
+    return retVal
 }
 
 def scheduleCodesPage(params) {
@@ -837,7 +1097,7 @@ def scheduleCodesPage(params) {
             def priorUserDayOfWeek = settings."userDayOfWeek${schedule}${i}"
             def priorUserStartTime = settings."userStartTime${schedule}${i}"
             def priorUserEndTime = settings."userEndTime${schedule}${i}"
-            log.debug "Schedule:$schedule, User:$i, Name: $name, UserDayOfWeek: $priorUserDayOfWeek, UserStartTime: $priorUserStartTime, UserEndTime: $priorUserEndTime"
+            log.trace "Schedule:$schedule, User:$i, Name: $name, UserDayOfWeek: $priorUserDayOfWeek, UserStartTime: $priorUserStartTime, UserEndTime: $priorUserEndTime"
 
             input "userStartTime${schedule}${i}", "time", title: "Start Time", required: false
             input "userEndTime${schedule}${i}", "time", title: "End Time", required: false
@@ -974,8 +1234,10 @@ def appTouch() {
 
     state.usedOneTimeCodes = [:]
     state.trackUsedOneTimeCodes = [] // Track for reporting purposes
-    state.programmedCodes = [:] // List of active codes confirmed by locks
-    state.tempTrackDeleteCodes = [:] // List of temp codes to track while initializing by locks
+    state.retryCodeCount = [:] // Number of times a code programming has been retried
+    if (!state.lockCodes) {
+        state.lockCodes = [:] // Save list of programmed codes, initialize only if not already done
+    }
     state.updateLockList = []
     state.expiredLockList = []
     atomicState.reLocks = [:] // List of lock to relock after a timed delay
@@ -984,8 +1246,10 @@ def appTouch() {
     atomicState.unLocks = [] // List of lock to unlock after a short delay
     for (lock in locks) {
         state.usedOneTimeCodes[lock.id] = [] // List of used one time codes for this lock
-        state.programmedCodes[lock.id] = [] // List of verified/confirmed programmed codes for this lock
-        state.tempTrackDeleteCodes[lock.id] = [] // List of temp codes to track while initializing
+        state.retryCodeCount[lock.id] = [:] // Number of times a code programming has been retried for the lock
+        if (!state.lockCodes[lock.id]) {
+            state.lockCodes[lock.id] = [:] /// Track programmed codes for this lock, initialize only if not already done
+        }
         state.updateLockList.add(lock.id) // reset the state for each lock to be processed with update
         state.expiredLockList.add(lock.id) // reset the state for each lock to be processed with expired
         //log.trace "Added $lock id ${lock.id} to unprocessed locks update list ${state.updateLockList} and expire list ${state.expiredLockList}"
@@ -993,12 +1257,12 @@ def appTouch() {
     state.updateNextCode = 1 // set next code to be set for the update loop
     state.expiredNextCode = 1 // set next code to be set for the expired loop
 
-    log.debug "Install complete, code updates starting with code $state.updateNextCode"
+    log.trace "Install complete, code updates starting with code $state.updateNextCode"
 
     if (state.clearCodes) {
         clearAllCodes()
     } else {
-        initializeCodes() // Initialize codes
+        kickStart() // Initialize codes
     }
 }
 
@@ -1026,7 +1290,7 @@ def changeHandler(evt) {
         //log.trace "Added $lock id ${lock.id} back to unprocessed locks list ${state.expiredLockList}"
     }
     
-    codeCheck()
+    kickStart()
 }
 
 def sensorHandler(evt) {
@@ -1035,7 +1299,7 @@ def sensorHandler(evt) {
     def sensor = evt.device
 
     def lock = locks.find { settings."sensor${it}"?.id == sensor.id } // Find the lock for this sensor, match by ID and not objects
-    log.debug "Sensor ${sensor} belongs to Lock ${lock}"
+    log.trace "Sensor ${sensor} belongs to Lock ${lock}"
 
     if (evt.value == "closed") { // Door was closed
         if (lock && settings."relockDoor${lock}" && (settings."relockDoorModes${lock}" ? settings."relockDoorModes${lock}".find{it == location.mode} : true)) { // Are we asked to reLock this door
@@ -1140,7 +1404,17 @@ def reLockDoor() {
         def lockSensor = settings."sensor${lock}" // Get the sensor for the lock
         Long timeLeft = (((60 * 1000 * settings."relockAfter${lock}") + timestamp) - now())/1000 // timestamp and now() is in ms
         if (timeLeft <= 1) { // If we are within 1 second then go ahead since the timer isn't always 100% accurate
-            if (lockSensor.latestValue("contact") == "closed") {
+            if (!lockSensor) { // If we don't have a sensor then just lock on schedule
+                log.info "No sensor found on ${lock} when closed, locking the door"
+                lock.lock() // lock it
+                //log.trace "Removing ${lockid} from the list of pending relocks"
+                def reLocks = atomicState.reLocks // We need to deference the atomicState object each time, https://community.smartthings.com/t/atomicstate-not-working/27827/6?u=rboy
+                reLocks.remove(lockid) // We are done with this lock, remove it from the list
+                atomicState.reLocks = reLocks // set it back to atomicState
+                //log.trace "Checking for any pending relocks in 3 seconds"
+                startTimer(3, reLockDoor) // Next pending relock in 3 seconds (give it some time for the mesh network)
+                return // We're done here
+            } else if (lockSensor.latestValue("contact") == "closed") {
                 log.info "Sensor ${lockSensor} is reporting door ${lock} is closed, locking the door"
                 lock.lock() // lock it
                 //log.trace "Removing ${lockid} from the list of pending relocks"
@@ -1181,7 +1455,7 @@ def notifyOpenDoor() {
         Long timeLeft = (((60 * 1000 * settings."openNotifyTimeout${lock}") + timestamp) - now())/1000 // timestamp and now() is in ms
         if (timeLeft <= 1) { // If we are within 1 second then go ahead since the timer isn't always 100% accurate
             if (lockSensor.latestValue("contact") == "closed") {
-                log.debug "Sensor ${lockSensor} is reporting door ${lock} is closed, no notification required"
+                log.trace "Sensor ${lockSensor} is reporting door ${lock} is closed, no notification required"
                 //log.trace "Removing ${lockid} from the list of pending notifications"
                 def notifyOpenDoors = atomicState.notifyOpenDoors // We need to deference the atomicState object each time, https://community.smartthings.com/t/atomicstate-not-working/27827/6?u=rboy
                 notifyOpenDoors.remove(lock.id) // We are done with this lock, remove it from the list
@@ -1235,6 +1509,8 @@ def codeResponse(evt) {
         type = "added"
     } else if (["is not set", "deleted", "unset", "Deleted"].any { desc?.contains(it) }) {
         type = "deleted"
+    } else if (["Renamed"].any { desc?.contains(it) }) {
+        type = "renamed"
     }
     
     if (!type) {
@@ -1242,22 +1518,23 @@ def codeResponse(evt) {
         return
     }
     
-    if ((!state.programmedCodes[lock.id].contains(user as String)) && (type == "added")) { // We can get the notifications multiple times
-        state.programmedCodes[lock.id].add(user as String)
+    if ((!state.lockCodes[lock.id].(user as String)) && (type == "added")) { // We can get the notifications multiple times
+        state.lockCodes[lock.id][user as String] = settings."userCodes${user}"
+        state.retryCodeCount[lock.id][user as String] = 0 // Reset the retry
         def msg = "Confirmed $lock added $name to user $user"
         log.info msg
         detailedNotifications ? sendNotifications(msg) : sendNotificationEvent(msg)
     }
 
-    if ((state.programmedCodes[lock.id].contains(user as String) || state.tempTrackDeleteCodes[lock.id].contains(user as String)) && (type == "deleted")) { // We can get the notifications multiple times (don't track "was reset" as that's an intermediary notification while setting a code)
+    if ((state.lockCodes[lock.id].(user as String)) && (type == "deleted")) { // We can get the notifications multiple times (don't track "was reset" as that's an intermediary notification while setting a code)
         // First update tracking lists for used one time codes - to avoid a race condition with programmed codes
         if (state.usedOneTimeCodes[lock.id].contains(user as String)) {
             state.usedOneTimeCodes[lock.id].remove(user as String)
             log.trace "Deleted code was a used one time code, removing it from list of used one time codes"
         }
 
-        state.programmedCodes[lock.id].remove(user as String)
-        state.tempTrackDeleteCodes[lock.id].remove(user as String)
+        state.lockCodes[lock.id].remove(user as String)
+        state.retryCodeCount[lock.id][user as String] = 0 // Reset the retry
         def msg = "Confirmed ${name ?: ""} user $user was deleted from $lock"
         log.info msg
         detailedNotifications ? sendNotifications(msg) : sendNotificationEvent(msg)
@@ -1269,7 +1546,7 @@ def lockHandler(evt) {
     def data = null
     def lock = evt.device
     
-    log.debug "Lock event name $evt.name, value $evt.value, device $evt.displayName, description $evt.descriptionText, data $evt.data"
+    log.trace "Lock event name $evt.name, value $evt.value, device $evt.displayName, description $evt.descriptionText, data $evt.data"
 
     def evtMap = [name:evt.name, value:evt.value, displayName:evt.displayName, descriptionText:evt.descriptionText, data:evt.data, lockId: evt.device.id]
 
@@ -1303,25 +1580,20 @@ def processUnlockEvent(evt) {
 
 	log.trace "Processing $lock unlock event: $evt"
 
-    // Check if we have a sensor and delayed relock is enabled, if so then start the timer now just incase the user never opens the door
-    def sensor = settings."sensor${lock}"
-    if (sensor?.latestValue("contact") == "closed") { // Door is still closed
-        log.trace "Found Sensor ${sensor} assigned to Lock ${lock} and it's still closed"
-
-        if (settings."relockDoor${lock}" && settings."relockAfter${lock}" && (settings."relockDoorModes${lock}" ? settings."relockDoorModes${lock}".find{it == location.mode} : true)) { // Are we asked to reLock this door
-            if (lock.hasAttribute('autolock') && (lock.latestValue("autolock") == "enabled")) {
-                log.warn "Disable AutoLock on physical lock to use SmartApp AutoReLock and AutoUnlock features"
-            } else {
-                log.debug "Scheduling ${lock} to lock in ${settings."relockAfter${lock}"} minutes"
-                def reLocks = atomicState.reLocks ?: [:] // We need to deference the atomicState object each time and it may contain a null if it's empty so we need to allocate a new object, https://community.smartthings.com/t/atomicstate-not-working/27827/6?u=rboy
-                //log.trace "Adding ${lock.id} to the list of relocks"
-                reLocks[lock.id] = now() // Atomic to ensure we get upto date info here, Update and Add work the same way here so we don't need to check before adding/updating
-                atomicState.reLocks = reLocks // Set it back, we can't work direct on atomicState
-                reLockDoor() // Call relock door it'll take of delaying the lock as required
-            }
+    // Check if we have delayed relock is enabled, if so then start the timer now just incase the user never opens the door (reLockDoor will take care of sensor if present, immediate relock should never happen without a sensor)
+    if (settings."relockDoor${lock}" && settings."relockAfter${lock}" && (settings."relockDoorModes${lock}" ? settings."relockDoorModes${lock}".find{it == location.mode} : true)) { // Are we asked to reLock this door
+        if (lock.hasAttribute('autolock') && (lock.latestValue("autolock") == "enabled")) {
+            log.warn "Disable AutoLock on physical lock to use SmartApp AutoReLock and AutoUnlock features"
         } else {
-            log.trace "No relock timeout defined, not scheduling relock"
+            log.debug "Scheduling ${lock} to lock in ${settings."relockAfter${lock}"} minutes"
+            def reLocks = atomicState.reLocks ?: [:] // We need to deference the atomicState object each time and it may contain a null if it's empty so we need to allocate a new object, https://community.smartthings.com/t/atomicstate-not-working/27827/6?u=rboy
+            //log.trace "Adding ${lock.id} to the list of relocks"
+            reLocks[lock.id] = now() // Atomic to ensure we get upto date info here, Update and Add work the same way here so we don't need to check before adding/updating
+            atomicState.reLocks = reLocks // Set it back, we can't work direct on atomicState
+            reLockDoor() // Call relock door it'll take of delaying the lock as required
         }
+    } else {
+        log.trace "Relock conditions not met, not scheduling relock"
     }
 
     if (evt.data) { // Was it unlocked using a code
@@ -1360,7 +1632,7 @@ def processUnlockEvent(evt) {
     }
 
     if ((data?.usedCode == null) && !(["keypad", "rfid"].any { lockMode?.contains(it) })) { // No extended data, must be a manual/auto/keyed unlock, NOTE: some locks don't send keypad user codes
-        log.debug "$evt.displayName was unlocked manually. Source type: $lockMode"
+        log.trace "$evt.displayName was unlocked manually. Source type: $lockMode"
 
         // Check if we have individual actions for each lock
         def lockStr = ""
@@ -1372,9 +1644,9 @@ def processUnlockEvent(evt) {
 
         // First disarm SHM since it goes off due to other events
         if (settings."runXPeopleUnlockActionsManual${lockStr}"?.find{it.currentPresence == "present"}) {
-            log.debug "${settings."runXPeopleUnlockActionsManual${lockStr}"?.find{it.currentPresence == "present"}} is present, not running unlock actions for door $lock"
+            log.trace "${settings."runXPeopleUnlockActionsManual${lockStr}"?.find{it.currentPresence == "present"}} is present, not running unlock actions for door $lock"
         } else if (settings."runXModeUnlockActionsManual${lockStr}"?.find{it == location.mode}) {
-            log.debug "Current mode is ${location.mode}, not running unlock actions for door $lock"
+            log.trace "Current mode is ${location.mode}, not running unlock actions for door $lock"
         } else {
             def msg = "$evt.displayName was unlocked $lockMode"
 
@@ -1423,6 +1695,18 @@ def processUnlockEvent(evt) {
                 msg += detailedNotifications ? ", turning off switches ${settings."turnOffSwitchesManual${lockStr}"}" : ""
             }
 
+            if (settings."unlockLocksManual${lockStr}") {
+                log.info "$evt.displayName was unlocked successfully, unlocking ${settings."unlockLocksManual${lockStr}"}"
+                settings."unlockLocksManual${lockStr}"?.unlock()
+                msg += detailedNotifications ? ", unlocking ${settings."unlockLocksManual${lockStr}"}" : ""
+            }
+
+            if (settings."openGarageManual${lockStr}") {
+                log.info "$evt.displayName was unlocked successfully, opening ${settings."openGarageManual${lockStr}"}"
+                settings."openGarageManual${lockStr}"?.open()
+                msg += detailedNotifications ? ", opening ${settings."openGarageManual${lockStr}"}" : ""
+            }
+
             if (settings."manualNotify${lockStr}" && (settings."manualNotifyModes${lockStr}" ? settings."manualNotifyModes${lockStr}".find{it == location.mode} : true)) {
                 sendNotifications(msg)
             }
@@ -1434,7 +1718,7 @@ def processUnlockEvent(evt) {
         def notifyModes = settings."userNotifyModes${i}"
         def notifyXPresence = settings."userXNotifyPresence${i}"
 
-        log.debug "Lock $evt.displayName unlocked by $userName, notify $notify, notify modes $notifyModes, notify NOT present $notifyXPresence, Source type: $lockMode"
+        log.trace "Lock $evt.displayName unlocked by $userName, notify $notify, notify modes $notifyModes, notify NOT present $notifyXPresence, Source type: $lockMode"
 
         def msg = ""
 
@@ -1453,7 +1737,7 @@ def processUnlockEvent(evt) {
         // Check if we have user override unlock actions defined
         def user = ""
         if (settings."userOverrideUnlockActions${i as String}") {
-            log.debug "Found per user unlock actions"
+            log.trace "Found per user unlock actions"
             user = i as String
         }
 
@@ -1467,9 +1751,9 @@ def processUnlockEvent(evt) {
 
         // First disarm SHM since it goes off due to other events
         if (settings."runXPeopleUnlockActions${lockStr}${user}"?.find{it.currentPresence == "present"}) {
-            log.debug "${settings."runXPeopleUnlockActions${lockStr}${user}"?.find{it.currentPresence == "present"}} is present, not running unlock actions for door $lock"
+            log.trace "${settings."runXPeopleUnlockActions${lockStr}${user}"?.find{it.currentPresence == "present"}} is present, not running unlock actions for door $lock"
         } else if (settings."runXModeUnlockActions${lockStr}${user}"?.find{it == location.mode}) {
-            log.debug "Current mode is ${location.mode}, not running unlock actions for door $lock"
+            log.trace "Current mode is ${location.mode}, not running unlock actions for door $lock"
         } else {
             if (settings."homeDisarm${lockStr}${user}") {
                 log.info "Disarming Smart Home Monitor"
@@ -1514,6 +1798,18 @@ def processUnlockEvent(evt) {
                 log.info "$evt.displayName was unlocked successfully, turning off switches ${settings."turnOffSwitches${lockStr}${user}"}"
                 settings."turnOffSwitches${lockStr}${user}"?.off()
                 msg += detailedNotifications ? ", turning off switches ${settings."turnOffSwitches${lockStr}${user}"}" : ""
+            }
+            
+            if (settings."unlockLocks${lockStr}${user}") {
+                log.info "$evt.displayName was unlocked successfully, unlocking ${settings."unlockLocks${lockStr}${user}"}"
+                settings."unlockLocks${lockStr}${user}"?.unlock()
+                msg += detailedNotifications ? ", unlocking ${settings."unlockLocks${lockStr}${user}"}" : ""
+            }
+
+            if (settings."openGarage${lockStr}${user}") {
+                log.info "$evt.displayName was unlocked successfully, opening ${settings."openGarage${lockStr}${user}"}"
+                settings."openGarage${lockStr}${user}"?.open()
+                msg += detailedNotifications ? ", opening ${settings."openGarage${lockStr}${user}"}" : ""
             }
         }
 
@@ -1693,19 +1989,29 @@ def processLockActions(evt) {
         extLockNotify = settings."externalLockNotify${lockStr}"
         extLockNotifyModes = settings."externalLockNotifyModes${lockStr}"
 
-        log.debug "Lock $evt.displayName locked by $userName, user notify $notify, user notify modes $notifyModes, notify NOT present $notifyXPresence, external notify $extLockNotify, external notify modes $extLockNotifyModes, user override action $userOverrideActions, Source type: $lockMode"
+        log.trace "Lock $evt.displayName locked by $userName, user notify $notify, user notify modes $notifyModes, notify NOT present $notifyXPresence, external notify $extLockNotify, external notify modes $extLockNotifyModes, user override action $userOverrideActions, Source type: $lockMode"
 
         def msg = "$evt.displayName was locked ${userName ? "by " + userName + " " : ""}$lockMode" // Default message to send
 
         if (settings."runXPeopleLockActions${lockStr}${user}"?.find{it.currentPresence == "present"}) {
-            log.debug "${settings."runXPeopleLockActions${lockStr}${user}"?.find{it.currentPresence == "present"}} is present, not running lock actions for door $lock"
+            log.trace "${settings."runXPeopleLockActions${lockStr}${user}"?.find{it.currentPresence == "present"}} is present, not running lock actions for door $lock"
         } else if (settings."runXModeLockActions${lockStr}${user}"?.find{it == location.mode}) {
-            log.debug "Current mode is ${location.mode}, not running lock actions for door $lock"
+            log.trace "Current mode is ${location.mode}, not running lock actions for door $lock"
         } else {
             if (settings."homeArm${lockStr}${user}") {
                 log.info "Arming Smart Home Monitor to Away"
                 sendLocationEvent(name: "alarmSystemStatus", value: "away")
                 msg += detailedNotifications ? ", Arming Smart Home Monitor to Away" : ""
+            }
+
+            if (settings."externalLockMode${lockStr}${user}") {
+                log.info "Changing mode to ${settings."externalLockMode${lockStr}${user}"}"
+                if (location.modes?.find{it.name == settings."externalLockMode${lockStr}${user}"}) {
+                    setLocationMode(settings."externalLockMode${lockStr}${user}") // First do this to avoid false alerts from a slow platform
+                }  else {
+                    log.warn "Tried to change to undefined mode '${settings."externalLockMode${lockStr}${user}"}'"
+                }
+                msg += detailedNotifications ? ", changing mode to ${settings."externalLockMode${lockStr}${user}"}" : ""
             }
 
             if (settings."externalLockPhrase${lockStr}${user}") {
@@ -1727,6 +2033,18 @@ def processLockActions(evt) {
                 settings."externalLockTurnOffSwitches${lockStr}${user}"?.off()
                 msg += detailedNotifications ? ", turning off switches ${settings."externalLockTurnOffSwitches${lockStr}${user}"}" : ""
             }
+            
+            if (settings."lockLocks${lockStr}${user}") {
+                log.info "$evt.displayName was locked successfully, locking ${settings."lockLocks${lockStr}${user}"}"
+                settings."lockLocks${lockStr}${user}"?.lock()
+                msg += detailedNotifications ? ", locking ${settings."lockLocks${lockStr}${user}"}" : ""
+            }
+
+            if (settings."closeGarage${lockStr}${user}") {
+                log.info "$evt.displayName was locked successfully, closing garage ${settings."closeGarage${lockStr}${user}"}"
+                settings."closeGarage${lockStr}${user}"?.close()
+                msg += detailedNotifications ? ", closing garage ${settings."closeGarage${lockStr}${user}"}" : ""
+            }
         }
 
         // Send a notification if required (message would be updated)
@@ -1738,7 +2056,7 @@ def processLockActions(evt) {
             msgs << msg
         }
     } else { // MANUAL LOCK
-        log.debug "Lock $evt.displayName locked manually, Source type: $lockMode"
+        log.trace "Lock $evt.displayName locked manually, Source type: $lockMode"
 
         // Check if we have individual actions for each lock
         def lockStr = ""
@@ -1751,14 +2069,24 @@ def processLockActions(evt) {
         def msg = "$evt.displayName was locked $lockMode" // Default message to send
 
         if (settings."runXPeopleLockActionsManual${lockStr}"?.find{it.currentPresence == "present"}) {
-            log.debug "${settings."runXPeopleLockActionsManual${lockStr}"?.find{it.currentPresence == "present"}} is present, not running lock actions for door $lock"
+            log.trace "${settings."runXPeopleLockActionsManual${lockStr}"?.find{it.currentPresence == "present"}} is present, not running lock actions for door $lock"
         } else if (settings."runXModeLockActionsManual${lockStr}"?.find{it == location.mode}) {
-            log.debug "Current mode is ${location.mode}, not running lock actions for door $lock"
+            log.trace "Current mode is ${location.mode}, not running lock actions for door $lock"
         } else {
             if (settings."homeArmManual${lockStr}") {
                 log.info "Arming Smart Home Monitor to Home/Stay"
                 sendLocationEvent(name: "alarmSystemStatus", value: "stay")
                 msg += detailedNotifications ? ", Arming Smart Home Monitor to Home" : ""
+            }
+
+            if (settings."externalLockModeManual${lockStr}") {
+                log.info "Changing mode to ${settings."externalLockModeManual${lockStr}"}"
+                if (location.modes?.find{it.name == settings."externalLockModeManual${lockStr}"}) {
+                    setLocationMode(settings."externalLockModeManual${lockStr}") // First do this to avoid false alerts from a slow platform
+                }  else {
+                    log.warn "Tried to change to undefined mode '${settings."externalLockModeManual${lockStr}"}'"
+                }
+                msg += detailedNotifications ? ", changing mode to ${settings."externalLockModeManual${lockStr}"}" : ""
             }
 
             if (settings."externalLockPhraseManual${lockStr}") {
@@ -1779,6 +2107,18 @@ def processLockActions(evt) {
                 log.info "$evt.displayName was locked successfully, turning off switches ${settings."externalLockTurnOffSwitchesManual${lockStr}"}"
                 settings."externalLockTurnOffSwitchesManual${lockStr}"?.off()
                 msg += detailedNotifications ? ", turning off switches ${settings."externalLockTurnOffSwitchesManual${lockStr}"}" : ""
+            }
+
+            if (settings."lockLocksManual${lockStr}") {
+                log.info "$evt.displayName was locked successfully, locking ${settings."lockLocksManual${lockStr}"}"
+                settings."lockLocksManual${lockStr}"?.lock()
+                msg += detailedNotifications ? ", locking ${settings."lockLocksManual${lockStr}"}" : ""
+            }
+
+            if (settings."closeGarageManual${lockStr}") {
+                log.info "$evt.displayName was locked successfully, closing garage ${settings."closeGarageManual${lockStr}"}"
+                settings."closeGarageManual${lockStr}"?.close()
+                msg += detailedNotifications ? ", closing garage ${settings."closeGarageManual${lockStr}"}" : ""
             }
         }
 
@@ -1812,10 +2152,18 @@ def clearAllCodes() {
                 def i = state.updateNextCode
                 def user = state.updateNextCode as Integer // which user slot are we using
                 def name = settings."userNames${i}" // Get the name for the slot
+                def code = settings."userCodes${i}" // Get the code for the slot
+                def userLocks = settings."userLocks${i}" // Get if locks to program for this user
                 
-                lock.deleteCode(user) // Delete the user
-                def msg = "Requesting $lock to clear user $user ${name ?: ""}"
-                log.debug msg
+                // ST can't clear too many codes at once, so lets prioritize since this is a fresh install of the app
+                // If we are adding a code to the slot then clear it here, otherwise mark the previous code as populated so the app will clear it eventually
+                if (code && !((locks?.size() > 1) && userLocks && !userLocks?.contains(lock.displayName))) {
+                    deleteCode(lock, user) // Delete the user
+                    def msg = "Requesting $lock to clear user $user ${name ?: ""}"
+                    log.debug msg
+                } else {
+                    state.lockCodes[lock.id][user as String] = "1" // Indicate (special) previous code so the app will clear it later
+                }
                 
                 state.updateNextCode = state.updateNextCode + 1 // move onto the next code
                 
@@ -1845,240 +2193,12 @@ def clearAllCodes() {
 
     msgs << "Starting code programming in 15 seconds"
     log.trace msgs?.last()
-    startTimer(15, initializeCodes) // It takes the lock about 15 seconds to clear the codes and finish up pending commands
+    startTimer(15, kickStart) // It takes the lock about 15 seconds to clear the codes and finish up pending commands
 
     // Last thing to do since it could timeout
     for (msg in msgs) {
         detailedNotifications ? sendNotifications(msg) : sendNotificationEvent(msg)
     }
-}
-
-def initializeCodes() {
-    TimeZone timeZone = location.timeZone
-    if (!timeZone) {
-        timeZone = TimeZone.getDefault()
-        log.error "Hub location/timezone not set, using ${timeZone.getDisplayName()} timezone. Please set Hub location and timezone for the codes to work accurately"
-        sendPush "Hub location/timezone not set, using ${timeZone.getDisplayName()} timezone. Please set Hub location and timezone for the codes to work accurately"
-    }
-
-    log.trace "The date/time on the hub now is ${(new Date(now())).format("EEE MMM dd yyyy HH:mm z", timeZone)}"
-
-    for (lock in locks) {
-        if (state.updateLockList.contains(lock.id)) { // this lock codes hasn't been completely initiated
-            def userCodes = [] // Build the list and program them together at once using updateCodes to work around the crappy platform timers issue
-            def msgs = [] // Message to send
-            log.trace "Initializing pending codes for $lock"
-            while (state.updateNextCode <= settings.maxUserNames) {
-                log.trace "Updating code $state.updateNextCode on $lock"
-                def i = state.updateNextCode // Next code we are checking
-                def name = settings."userNames${i}" // Get the name for the slot
-                def code = settings."userCodes${i}" as String // Get the code for the slot
-                def notify = settings."userNotify${i}" // Notification setting
-                def userType = settings."userType${i}" // User type
-                def expDate = settings."userExpireDate${i}" // Get the expiration date
-                def expTime = settings."userExpireTime${i}" // Get the expiration time
-                def startDate = settings."userStartDate${i}" // Get the start date
-                def startTime = settings."userStartTime${i}" // Get the start time
-                def userPresent = settings."userPresent${i}" // Get user presence
-                def userNotPresent = settings."userNotPresent${i}" // Get user not presence
-                def userModes = settings."userModes${i}" // Get user modes
-                def userLocks = settings."userLocks${i}"
-                def user = i as Integer // which user slot are we using 
-                def doAdd = false // by default we dont' add codes
-                
-                //log.trace "InitializeCodes $i, Name: $name, Code: $code, Notify: $notify, UserType: $userType, ExpireDate: $expDate, ExpireTime: $expTime, StartDate: $startDate, StartTime: $startTime, Present: $userPresent, Not Present: $userNotPresent, UserModes: $userModes, Locks: $userLocks"
-
-                // Check if we have more than one lock and use has not selected this lock for programming then delete it
-                if ((locks?.size() > 1) && userLocks && !userLocks?.contains(lock.displayName)) {
-                    doAdd = false // delete the code
-                    log.debug "$lock is not configured for user $user ${name ?: ""}"
-                    sendNotificationEvent("$lock is not configured for user $user ${name ?: ""}")
-                } else {
-                    // Check the code type
-                    switch (userType) {
-                        case 'Expire on':
-                        if (code != null) {
-                            if (expDate && expTime) {
-                                def midnightToday = timeToday("2000-01-01T00:00:00.000-0000", timeZone)
-                                String dst = timeZone.getDisplayName(timeZone.inDaylightTime(new Date(now())), TimeZone.SHORT) // Keep current timezone
-                                def expT = (timeToday(expTime, timeZone).time - midnightToday.time)
-                                def expD = Date.parse("yyyy-MM-dd Z", expDate + " " + dst).toCalendar()
-                                def exp = expD.getTimeInMillis() + expT
-                                def expStr = (new Date(exp.value)).format("EEE MMM dd yyyy HH:mm z", timeZone)
-                                if (exp > now()) {
-                                    if (startDate && startTime) {
-                                        def startT = (timeToday(startTime, timeZone).time - midnightToday.time)
-                                        def startD = Date.parse("yyyy-MM-dd Z", startDate + " " + dst).toCalendar()
-                                        def start = startD.getTimeInMillis() + startT
-                                        def startStr = (new Date(start.value)).format("EEE MMM dd yyyy HH:mm z", timeZone)
-                                        if (start <= now()) {
-                                            if (!state.programmedCodes[lock.id].contains(user as String)) {
-                                                doAdd = true // we need to add the code
-                                                log.debug "$lock user $user $name's code is set to start on $startStr"
-                                                sendNotificationEvent("$lock user $user $name's code is set to start on $startStr")
-                                            } else {
-                                                log.error "$lock User $user $name is already tracked as start added"
-                                            }
-                                        } else {
-                                            if (!state.programmedCodes[lock.id].contains(user as String)) {
-                                                log.debug "$lock user $user $name's code is set to start in future on $startStr"
-                                                sendNotificationEvent("$lock user $user $name's code is set to start in future on $startStr")
-                                            } else {
-                                                log.error "$lock user $user $name is already tracked as start added"
-                                            }
-                                        }
-                                    } else if (startDate && !startTime) {
-                                        log.error "User $user $name set to Start but does not have a valid Start Date/Time: $startDate or Time: $startTime"
-                                    } else {
-                                        doAdd = true // we need to add the code
-                                        sendNotificationEvent("$lock user $user $name's code is set to expire on $expStr")
-                                        log.debug "$lock user $user $name's code is set to expire on $expStr"
-                                    }
-                                } else {
-                                    sendNotificationEvent("$lock user $user $name's code expired on $expStr")
-                                    log.debug "$lock user $user $name expired on $expStr"
-                                }
-                            } else {
-                                log.error "$lock User $user $name set to Expire but does not have a Expiration Date: $expDate or Time: $expTime"
-                            }
-                        }
-                        break
-
-                        case 'Scheduled':
-                        if (code != null) {
-                            ('A'..'C').each { schedule ->
-                                if (settings."userStartTime${schedule}${i}" && settings."userEndTime${schedule}${i}") {
-                                    if (checkSchedule(user, schedule)) { // Within operating schedule
-                                        if (state.programmedCodes[lock.id].contains(user as String)) {
-                                            log.error "$lock scheduled user $user $name is already tracked. Schedule $schedule is scheduled to work between ${settings."userDayOfWeek${schedule}${i}"}: ${settings."userStartTime${schedule}${i}" ? (new Date(timeToday(settings."userStartTime${schedule}${i}", timeZone).time)).format("HH:mm z", timeZone) : ""} to ${settings."userEndTime${schedule}${i}" ? (new Date(timeToday(settings."userEndTime${schedule}${i}", timeZone).time)).format("HH:mm z", timeZone) : ""}"
-                                        } else {
-                                            log.debug "$lock user $user $name schedule $schedule is scheduled to work between ${settings."userDayOfWeek${schedule}${i}"}: ${settings."userStartTime${schedule}${i}" ? (new Date(timeToday(settings."userStartTime${schedule}${i}", timeZone).time)).format("HH:mm z", timeZone) : ""} to ${settings."userEndTime${schedule}${i}" ? (new Date(timeToday(settings."userEndTime${schedule}${i}", timeZone).time)).format("HH:mm z", timeZone) : ""}"
-                                        }
-                                        doAdd = true // Add the user
-                                        def msg = "$lock user $user $name schedule $schedule is scheduled to work between ${settings."userDayOfWeek${schedule}${i}"}: ${settings."userStartTime${schedule}${i}" ? (new Date(timeToday(settings."userStartTime${schedule}${i}", timeZone).time)).format("HH:mm z", timeZone) : ""} to ${settings."userEndTime${schedule}${i}" ? (new Date(timeToday(settings."userEndTime${schedule}${i}", timeZone).time)).format("HH:mm z", timeZone) : ""}"
-                                        log.debug msg
-                                        sendNotificationEvent(msg)
-                                    } else {
-                                        def msg = "$lock user $user $name is outside operating schedule $schedule between ${settings."userDayOfWeek${schedule}${i}"}: ${settings."userStartTime${schedule}${i}" ? (new Date(timeToday(settings."userStartTime${schedule}${i}", timeZone).time)).format("HH:mm z", timeZone) : ""} to ${settings."userEndTime${schedule}${i}" ? (new Date(timeToday(settings."userEndTime${schedule}${i}", timeZone).time)).format("HH:mm z", timeZone) : ""}"
-                                        log.debug msg
-                                        sendNotificationEvent(msg)
-                                    }
-                                } else {
-                                    log.debug "$lock user $user $name no schedule $schedule defined"
-                                }
-                            }
-                        }
-                        break
-
-                        case 'Modes':
-                        if (code != null) {
-                            // Any of the selected modes are active then activate the codes
-                            if (userModes?.find{it == location.mode}) {
-                                doAdd = true // the code
-                                def msg = "$lock user $user $name is being added because mode ${location.mode} is active"
-                                log.debug msg
-                                sendNotificationEvent(msg)
-                            } else {
-                                def msg = "$lock user $user $name is not being deleted because mode ${location.mode} is not in the selected modes"
-                                log.debug msg
-                                sendNotificationEvent(msg)
-                            }
-                        }
-                        break
-
-                        case 'Presence':
-                        if (code != null) {
-                            // Any of the 'present' users AND none of the 'not present' users are there then the code is active
-                            if ((userPresent || userNotPresent) && // Atleast one condition is specified
-                                (userPresent ? userPresent.any{it.currentPresence == "present"} : true) &&
-                                (userNotPresent ? userNotPresent.every{it.currentPresence != "present"} : true)
-                               ) {
-                                doAdd = true // the code
-                                def msg = "$lock user $user $name is being added because ${userPresent ? "${userPresent.findAll{it.currentPresence == "present"}} are present" : (userNotPresent ? "${userNotPresent} are not present" : "")}"
-                                log.debug msg
-                                sendNotificationEvent(msg)
-                            } else {
-                                def msg = "$lock user $user $name is being deleted because${(userPresent || userNotPresent) ? (userPresent.every{it.currentPresence != "present"} ? " ${userPresent} are not present" : (userNotPresent ? " ${userNotPresent.findAll{it.currentPresence == "present"}} are present" : "")) : " no user presence is defined"}"
-                                log.debug msg
-                                sendNotificationEvent(msg)
-                            }
-                        }
-                        break
-                        
-                        case 'One time':
-                        if (code != null) {
-                            doAdd = true // the code
-                            log.debug "$lock user $user $name is a one time code"
-                            sendNotificationEvent("$lock user $user $name is a one time code")
-                        }
-                        break
-
-                        case 'Permanent':
-                        if (code != null) {
-                            doAdd = true // add the code
-                            log.debug "$lock user $user $name is a permanent code"
-                            sendNotificationEvent("$lock user $user $name is a permanent code")
-                        }
-                        break
-
-                        case 'Inactive':
-                        doAdd = false // delete the code
-                        log.debug "$lock user $user $name is an inactive code"
-                        sendNotificationEvent("$lock user $user $name is an inactive code")
-                        break
-
-                        default: // nothing selected by the user
-                            doAdd = false // delete the code
-                        log.debug "$lock user $user is empty, deleting code"
-                        sendNotificationEvent("$lock user $user is empty, deleting code")
-                        break
-                    }
-                }
-
-                if ((code != null) && doAdd) { // We have a code and it is not expired/within schedule, update or set the code in the slot
-                    lock.hasAttribute("maxCodes") ? lock.setCode(user, code, name) : lock.setCode(user, code) // Keep support for older device handlers
-                    def msg = "Requesting $lock to add $name to user $user"
-                    msgs << msg
-                    log.debug msg
-
-                    if (disableRetry && !state.programmedCodes[lock.id].contains(user as String)) {
-                        log.info "Retry programming disabled, assuming user was added successfully to the lock"
-                        state.programmedCodes[lock.id].add(user as String)
-                    }
-                } else { // Delete the slot
-                    lock.deleteCode(user)
-                    def msg = "Requesting $lock to delete user $user ${name ?: ""}"
-                    msgs << msg
-                    log.debug msg
-
-                    if (state.programmedCodes[lock.id].contains(user as String)) { // At this stage there should be no codes in the programmed list
-                        log.error "Initialization ERROR: ${name ?: ""} user $user exists in $lock list of confirmed programmed codes"
-                    } else if (!disableRetry) { // If we have disabled retry then we don't need confirmation of deletion, just assuming it gets deleted
-                        log.trace "Tracking ${name ?: ""} user $user to the list of temp codes to track for $lock to confirm if the code gets deleted"
-                        state.tempTrackDeleteCodes[lock.id].add(user as String) // Add it to the list so that we can get confirmation from the lock that the code was deleted
-                    }
-                }
-
-                state.updateNextCode = state.updateNextCode + 1 // move onto the next code
-
-                log.trace "Scheduled next lock code initialization in 15 seconds"
-                startTimer(15, initializeCodes) // It takes the lock about 15 seconds to program each code and get a response (give lock time to finish up programming actions)
-
-                // Last thing to do because it can timeout
-                for (msg in msgs) {
-                    detailedNotifications ? sendNotifications(msg) : sendNotificationEvent(msg)
-                }
-                return // We started a timer for the next lock initialize, we're done here - exit
-            }
-
-            state.updateLockList.remove(lock.id) // we are done with this lock
-            state.updateNextCode = 1 // reset back to 1 for the next lock
-            //log.trace "$lock id $lock.id code updates complete, unprocessed locks ${state.updateLockList}, reset next code update to $state.updateNextCode"
-        }
-    }
-
-    log.trace "Starting code programming verfication"
-    codeCheck() // Each lock has had enough time to program itself so we can start verification right away
 }
 
 def codeCheck() {
@@ -2127,14 +2247,18 @@ def codeCheck() {
 
                 // Check if we have more than one lock and use has not selected this lock for programming then delete it
                 if ((locks?.size() > 1) && userLocks && !userLocks?.contains(lock.displayName)) {
-                    if (state.programmedCodes[lock.id].contains(user as String)) {
-                        lock.deleteCode(user)
+                    if (state.lockCodes[lock.id].(user as String)) {
+                        deleteCode(lock, user)
                         def msg = "Requesting $lock to delete unconfigured user $user ${name ?: ""}"
                         log.debug msg
+                        if ((state.retryCodeCount[lock.id][user as String] = (state.retryCodeCount[lock.id][user as String] ?: 0) + 1) > maxRetries) {
+                            log.info "Retry programming exceeded, assuming user was deleted successfully from the lock"
+                            state.lockCodes[lock.id].remove(user as String)
+                        }
 
                         state.expiredNextCode = state.expiredNextCode + 1 // move onto the next code
-                        //log.trace "Scheduled next code check in ${sendDelay > 0 ? sendDelay : 15} seconds"
-                        startTimer((sendDelay > 0 ? sendDelay : 15), codeCheck) // schedule the next code update after a few seconds otherwise it overloads locks and doesn't work
+                        //log.trace "Scheduled next code check in ${sendDelay ?: defaultSendDelay} seconds"
+                        startTimer((sendDelay ?: defaultSendDelay), codeCheck) // schedule the next code update after a few seconds otherwise it overloads locks and doesn't work
                         
                         // Last thing to do since it could timeout
                         detailedNotifications ? sendNotifications(msg) : sendNotificationEvent(msg)
@@ -2148,7 +2272,6 @@ def codeCheck() {
                         case 'Expire on':
                         if (code != null) {
                             def doAdd = false
-                            def doDelete = false
                             def msg
                             if (expDate && expTime) {
                                 def midnightToday = timeToday("2000-01-01T00:00:00.000-0000", timeZone)
@@ -2164,66 +2287,62 @@ def codeCheck() {
                                         def start = startD.getTimeInMillis() + startT
                                         def startStr = (new Date(start.value)).format("EEE MMM dd yyyy HH:mm z", timeZone)
                                         if (start <= now()) {
-                                            if (!state.programmedCodes[lock.id].contains(user as String)) {
-                                                msg = "Requesting $lock to add $name to user $user, code: $code, because it is scheduled to start at $startStr"
-                                                doAdd = true // we need to add the code
-                                            } else {
-                                                log.debug "$lock User $user $name is already active and is set to expire on $expStr"
-                                            }
+                                            msg = "Requesting $lock to add $name to user $user, code: $code, because it is scheduled to start at $startStr"
+                                            doAdd = true // we need to add the code
+                                            log.trace "$lock User $user $name is scheduled to start at $startStr and expire on $expStr"
                                         } else {
-                                            if (!state.programmedCodes[lock.id].contains(user as String)) {
-                                                log.debug "$lock user $user $name's code is set to start in future on $startStr"
-                                            } else {
-                                                log.error "$lock user $user $name is already tracked as start added"
-                                            }
+                                            msg = "Requesting $lock to delete future user $user $name, start on $startStr"
+                                            log.trace "$lock user $user $name's code is set to start in future on $startStr"
                                         }
                                     } else if (startDate && !startTime) {
                                         log.error "User $user $name set to Start but does not have a valid Start Date/Time: $startDate or Time: $startTime"
                                     } else {
                                         msg = "Requesting $lock to add $name to user $user, code: $code, it is set to expire on $expStr"
                                         doAdd = true // we need to add the code
+                                        log.trace "$lock User $user $name is set to expire on $expStr"
                                     }
                                 } else {
                                     msg = "Requesting $lock to delete expired user $user $name, expired on $expStr"
-                                    doDelete = true
                                 }
                             } else {
                                 log.error "$lock User $user $name set to Expire but does not have a Expiration Date: $expDate or Time: $expTime"
                             }
 
                             if (doAdd) {
-                                if (!state.programmedCodes[lock.id].contains(user as String)) {
-                                    lock.hasAttribute("maxCodes") ? lock.setCode(user, code, name) : lock.setCode(user, code) // Keep support for older device handlers
+                                if (state.lockCodes[lock.id].(user as String) != code) { // Only if code has changed
+                                    setCode(lock, user, code, name)
                                     log.debug msg
-                                    if (disableRetry) {
-                                        log.info "Retry programming disabled, assuming user was added successfully to the lock"
-                                        state.programmedCodes[lock.id].add(user as String)
+                                    if ((state.retryCodeCount[lock.id][user as String] = (state.retryCodeCount[lock.id][user as String] ?: 0) + 1) > maxRetries) {
+                                        log.info "Retry programming exceeded, assuming user was added successfully to the lock"
+                                        state.lockCodes[lock.id][user as String] = code
                                     }
 
                                     state.expiredNextCode = state.expiredNextCode + 1 // move onto the next code
-                                    //log.trace "Scheduled next code check in ${sendDelay > 0 ? sendDelay : 15} seconds"
-                                    startTimer((sendDelay > 0 ? sendDelay : 15), codeCheck) // schedule the next code update after a few seconds otherwise it overloads locks and doesn't work
+                                    //log.trace "Scheduled next code check in ${sendDelay ?: defaultSendDelay} seconds"
+                                    startTimer((sendDelay ?: defaultSendDelay), codeCheck) // schedule the next code update after a few seconds otherwise it overloads locks and doesn't work
 
                                     // Last thing to do since it could timeout
                                     detailedNotifications ? sendNotifications(msg) : sendNotificationEvent(msg)
                                     return // We are done here, exit out as we've scheduled the next update
                                 } else {
+                                    if (getCodeName(lock, user) != name) { // If the username has changed update it
+                                        updateCodeName(lock, user, name)
+                                    }
                                     log.debug "$lock User $user $name is already active"
                                 }
-                            }
-
-                            if (doDelete) {
-                                if (state.programmedCodes[lock.id].contains(user as String)) {
-                                    lock.deleteCode(user)
+                            } else {
+                                if (state.lockCodes[lock.id].(user as String)) {
+                                    deleteCode(lock, user)
+                                    msg = msg ?: "Requesting $lock to delete user $user ${name ?: ""}"
                                     log.debug msg
-                                    if (disableRetry) {
-                                        log.info "Retry programming disabled, assuming user was deleted successfully from the lock"
-                                        state.programmedCodes[lock.id].remove(user as String)
+                                    if ((state.retryCodeCount[lock.id][user as String] = (state.retryCodeCount[lock.id][user as String] ?: 0) + 1) > maxRetries) {
+                                        log.info "Retry programming exceeded, assuming user was deleted successfully from the lock"
+                                        state.lockCodes[lock.id].remove(user as String)
                                     }
 
                                     state.expiredNextCode = state.expiredNextCode + 1 // move onto the next code
-                                    //log.trace "Scheduled next code check in ${sendDelay > 0 ? sendDelay : 15} seconds"
-                                    startTimer((sendDelay > 0 ? sendDelay : 15), codeCheck) // schedule the next code update after a few seconds otherwise it overloads locks and doesn't work
+                                    //log.trace "Scheduled next code check in ${sendDelay ?: defaultSendDelay} seconds"
+                                    startTimer((sendDelay ?: defaultSendDelay), codeCheck) // schedule the next code update after a few seconds otherwise it overloads locks and doesn't work
 
                                     // Last thing to do since it could timeout
                                     detailedNotifications ? sendNotifications(msg) : sendNotificationEvent(msg)
@@ -2232,18 +2351,18 @@ def codeCheck() {
                                     log.debug "$lock User $user $name is already deleted"
                                 }
                             }
-                        } else if (state.programmedCodes[lock.id].contains(user as String)) { // Code is null but the list shows programmed, i.e. we were asked to explicit send a delete command to the lock
-                            lock.deleteCode(user)
+                        } else if (state.lockCodes[lock.id].(user as String)) { // Code is null but the list shows programmed, i.e. we were asked to explicit send a delete command to the lock
+                            deleteCode(lock, user)
                             def msg = "Requesting $lock to delete user $user ${name ?: ""}"
                             log.debug msg
-                            if (disableRetry) {
-                                log.info "Retry programming disabled, assuming user was deleted successfully from the lock"
-                                state.programmedCodes[lock.id].remove(user as String)
+                            if ((state.retryCodeCount[lock.id][user as String] = (state.retryCodeCount[lock.id][user as String] ?: 0) + 1) > maxRetries) {
+                                log.info "Retry programming exceeded, assuming user was deleted successfully from the lock"
+                                state.lockCodes[lock.id].remove(user as String)
                             }
 
                             state.expiredNextCode = state.expiredNextCode + 1 // move onto the next code
-                            //log.trace "Scheduled next code check in ${sendDelay > 0 ? sendDelay : 15} seconds"
-                            startTimer((sendDelay > 0 ? sendDelay : 15), codeCheck) // schedule the next code update after a few seconds otherwise it overloads locks and doesn't work
+                            //log.trace "Scheduled next code check in ${sendDelay ?: defaultSendDelay} seconds"
+                            startTimer((sendDelay ?: defaultSendDelay), codeCheck) // schedule the next code update after a few seconds otherwise it overloads locks and doesn't work
 
                             // Last thing to do since it could timeout
                             detailedNotifications ? sendNotifications(msg) : sendNotificationEvent(msg)
@@ -2259,56 +2378,59 @@ def codeCheck() {
                                 if (!state.trackUsedOneTimeCodes.contains(user as String)) {
                                     state.trackUsedOneTimeCodes.add(user as String) // track it for reporting purposes
                                 }
-                                lock.deleteCode(user)
+                                deleteCode(lock, user)
                                 def msg = "Requesting $lock to delete one time user $user $name"
                                 log.debug msg
-                                if (disableRetry) {
-                                    log.info "Retry programming disabled, assuming user was deleted successfully from the lock"
-                                    state.programmedCodes[lock.id].remove(user as String)
+                                if ((state.retryCodeCount[lock.id][user as String] = (state.retryCodeCount[lock.id][user as String] ?: 0) + 1) > maxRetries) {
+                                    log.info "Retry programming exceeded, assuming user was deleted successfully from the lock"
+                                    state.lockCodes[lock.id].remove(user as String)
                                 }
 
                                 state.expiredNextCode = state.expiredNextCode + 1 // move onto the next code
-                                //log.trace "Scheduled next code check in ${sendDelay > 0 ? sendDelay : 15} seconds"
-                                startTimer((sendDelay > 0 ? sendDelay : 15), codeCheck) // schedule the next code update after a few seconds otherwise it overloads locks and doesn't work
+                                //log.trace "Scheduled next code check in ${sendDelay ?: defaultSendDelay} seconds"
+                                startTimer((sendDelay ?: defaultSendDelay), codeCheck) // schedule the next code update after a few seconds otherwise it overloads locks and doesn't work
 
                                 // Last thing to do since it could timeout
                                 detailedNotifications ? sendNotifications(msg) : sendNotificationEvent(msg)
                                 return // We are done here, exit out as we've scheduled the next update
                             } else if (!state.trackUsedOneTimeCodes.contains(user as String)) { // If it's not been used add it to the lock
-                                if (!state.programmedCodes[lock.id].contains(user as String)) {
-                                    lock.hasAttribute("maxCodes") ? lock.setCode(user, code, name) : lock.setCode(user, code) // Keep support for older device handlers
+                                if (state.lockCodes[lock.id].(user as String) != code) { // Only if code has changed
+                                    setCode(lock, user, code, name)
                                     def msg = "Requesting $lock to add one time code $name to user $user, code: $code"
                                     log.debug msg
-                                    if (disableRetry) {
-                                        log.info "Retry programming disabled, assuming user was added successfully to the lock"
-                                        state.programmedCodes[lock.id].add(user as String)
+                                    if ((state.retryCodeCount[lock.id][user as String] = (state.retryCodeCount[lock.id][user as String] ?: 0) + 1) > maxRetries) {
+                                        log.info "Retry programming exceeded, assuming user was added successfully to the lock"
+                                        state.lockCodes[lock.id][user as String] = code
                                     }
 
                                     state.expiredNextCode = state.expiredNextCode + 1 // move onto the next code
-                                    //log.trace "Scheduled next code check in ${sendDelay > 0 ? sendDelay : 15} seconds"
-                                    startTimer((sendDelay > 0 ? sendDelay : 15), codeCheck) // schedule the next code update after a few seconds otherwise it overloads locks and doesn't work
+                                    //log.trace "Scheduled next code check in ${sendDelay ?: defaultSendDelay} seconds"
+                                    startTimer((sendDelay ?: defaultSendDelay), codeCheck) // schedule the next code update after a few seconds otherwise it overloads locks and doesn't work
 
                                     // Last thing to do since it could timeout
                                     detailedNotifications ? sendNotifications(msg) : sendNotificationEvent(msg)
                                     return // We are done here, exit out as we've scheduled the next update
                                 } else {
+                                    if (getCodeName(lock, user) != name) { // If the username has changed update it
+                                        updateCodeName(lock, user, name)
+                                    }
                                     log.debug "$lock User $user $name is a one time code but it has not been used yet"
                                 }
                             } else {
                                 log.debug "$lock one time user $user $name is already used"
                             }
-                        } else if (state.programmedCodes[lock.id].contains(user as String)) { // Code is null but the list shows programmed, i.e. we were asked to explicit send a delete command to the lock
-                            lock.deleteCode(user)
+                        } else if (state.lockCodes[lock.id].(user as String)) { // Code is null but the list shows programmed, i.e. we were asked to explicit send a delete command to the lock
+                            deleteCode(lock, user)
                             def msg = "Requesting $lock to delete user $user ${name ?: ""}"
                             log.debug msg
-                            if (disableRetry) {
-                                log.info "Retry programming disabled, assuming user was deleted successfully from the lock"
-                                state.programmedCodes[lock.id].remove(user as String)
+                            if ((state.retryCodeCount[lock.id][user as String] = (state.retryCodeCount[lock.id][user as String] ?: 0) + 1) > maxRetries) {
+                                log.info "Retry programming exceeded, assuming user was deleted successfully from the lock"
+                                state.lockCodes[lock.id].remove(user as String)
                             }
 
                             state.expiredNextCode = state.expiredNextCode + 1 // move onto the next code
-                            //log.trace "Scheduled next code check in ${sendDelay > 0 ? sendDelay : 15} seconds"
-                            startTimer((sendDelay > 0 ? sendDelay : 15), codeCheck) // schedule the next code update after a few seconds otherwise it overloads locks and doesn't work
+                            //log.trace "Scheduled next code check in ${sendDelay ?: defaultSendDelay} seconds"
+                            startTimer((sendDelay ?: defaultSendDelay), codeCheck) // schedule the next code update after a few seconds otherwise it overloads locks and doesn't work
 
                             // Last thing to do since it could timeout
                             detailedNotifications ? sendNotifications(msg) : sendNotificationEvent(msg)
@@ -2327,69 +2449,72 @@ def codeCheck() {
                                     if (checkSchedule(i, schedule)) { // Check if we are within operating schedule
                                         doAdd = true
                                         def msg = "Schedule $schedule active $lock to add $name to user $user, code: $code, because it is scheduled to work between ${settings."userDayOfWeek${schedule}${i}"}: ${settings."userStartTime${schedule}${i}" ? (new Date(timeToday(settings."userStartTime${schedule}${i}", timeZone).time)).format("HH:mm z", timeZone) : ""} to ${settings."userEndTime${schedule}${i}" ? (new Date(timeToday(settings."userEndTime${schedule}${i}", timeZone).time)).format("HH:mm z", timeZone) : ""}"
-                                        log.debug msg
+                                        log.trace msg
                                     } else {
                                         def msg = "Schedule $schedule NOT active for $lock $name user $user, scheduled to work between ${settings."userDayOfWeek${schedule}${i}"}: ${settings."userStartTime${schedule}${i}" ? (new Date(timeToday(settings."userStartTime${schedule}${i}", timeZone).time)).format("HH:mm z", timeZone) : ""} to ${settings."userEndTime${schedule}${i}" ? (new Date(timeToday(settings."userEndTime${schedule}${i}", timeZone).time)).format("HH:mm z", timeZone) : ""}"
-                                        log.debug msg
+                                        log.trace msg
                                     }
                                 } else {
-                                    log.debug "$lock user $user $name schedule $schedule not defined"
+                                    log.trace "$lock user $user $name schedule $schedule not defined"
                                 }
                             }
                             
                             if (doAdd) {
-                                if (state.programmedCodes[lock.id].contains(user as String)) {
+                                if (state.lockCodes[lock.id].(user as String) == code) { // If code hasn't changed, don't add it
+                                    if (getCodeName(lock, user) != name) { // If the username has changed update it
+                                        updateCodeName(lock, user, name)
+                                    }
                                     log.debug "$lock scheduled user $user $name is already active, not adding again"
                                 } else {
-                                    lock.hasAttribute("maxCodes") ? lock.setCode(user, code, name) : lock.setCode(user, code) // Keep support for older device handlers
+                                    setCode(lock, user, code, name)
                                     def msg = "Requesting $lock to add active scheduled $name to user $user, code: $code"
                                     log.debug msg
-                                    if (disableRetry) {
-                                        log.info "Retry programming disabled, assuming user was added successfully to the lock"
-                                        state.programmedCodes[lock.id].add(user as String)
+                                    if ((state.retryCodeCount[lock.id][user as String] = (state.retryCodeCount[lock.id][user as String] ?: 0) + 1) > maxRetries) {
+                                        log.info "Retry programming exceeded, assuming user was added successfully to the lock"
+                                        state.lockCodes[lock.id][user as String] = code
                                     }
 
                                     state.expiredNextCode = state.expiredNextCode + 1 // move onto the next code
-                                    //log.trace "Scheduled next code check in ${sendDelay > 0 ? sendDelay : 15} seconds"
-                                    startTimer((sendDelay > 0 ? sendDelay : 15), codeCheck) // schedule the next code update after a few seconds otherwise it overloads locks and doesn't work
+                                    //log.trace "Scheduled next code check in ${sendDelay ?: defaultSendDelay} seconds"
+                                    startTimer((sendDelay ?: defaultSendDelay), codeCheck) // schedule the next code update after a few seconds otherwise it overloads locks and doesn't work
 
                                     // Last thing to do since it could timeout
                                     detailedNotifications ? sendNotifications(msg) : sendNotificationEvent(msg)
                                     return // We are done here, exit out as we've scheduled the next update
                                 }
                             } else { // Outside operating schedule
-                                if (!state.programmedCodes[lock.id].contains(user as String)) {
+                                if (!state.lockCodes[lock.id].(user as String)) {
                                     log.debug "$lock scheduled user $user $name is already inactive, not removing again"
                                 } else {
-                                    lock.deleteCode(user)
+                                    deleteCode(lock, user)
                                     def msg = "Requesting $lock to delete inactive scheduled user $user $name"
                                     log.debug msg
-                                    if (disableRetry) {
-                                        log.info "Retry programming disabled, assuming user was deleted successfully from the lock"
-                                        state.programmedCodes[lock.id].remove(user as String)
+                                    if ((state.retryCodeCount[lock.id][user as String] = (state.retryCodeCount[lock.id][user as String] ?: 0) + 1) > maxRetries) {
+                                        log.info "Retry programming exceeded, assuming user was deleted successfully from the lock"
+                                        state.lockCodes[lock.id].remove(user as String)
                                     }
 
                                     state.expiredNextCode = state.expiredNextCode + 1 // move onto the next code
-                                    //log.trace "Scheduled next code check in ${sendDelay > 0 ? sendDelay : 15} seconds"
-                                    startTimer((sendDelay > 0 ? sendDelay : 15), codeCheck) // schedule the next code update after a few seconds otherwise it overloads locks and doesn't work
+                                    //log.trace "Scheduled next code check in ${sendDelay ?: defaultSendDelay} seconds"
+                                    startTimer((sendDelay ?: defaultSendDelay), codeCheck) // schedule the next code update after a few seconds otherwise it overloads locks and doesn't work
 
                                     // Last thing to do since it could timeout
                                     detailedNotifications ? sendNotifications(msg) : sendNotificationEvent(msg)
                                     return // We are done here, exit out as we've scheduled the next update
                                 }
                             }
-                        } else if (state.programmedCodes[lock.id].contains(user as String)) { // Code is null but the list shows programmed, i.e. we were asked to explicit send a delete command to the lock
-                            lock.deleteCode(user)
+                        } else if (state.lockCodes[lock.id].(user as String)) { // Code is null but the list shows programmed, i.e. we were asked to explicit send a delete command to the lock
+                            deleteCode(lock, user)
                             def msg = "Requesting $lock to delete user $user ${name ?: ""}"
                             log.debug msg
-                            if (disableRetry) {
-                                log.info "Retry programming disabled, assuming user was deleted successfully from the lock"
-                                state.programmedCodes[lock.id].remove(user as String)
+                            if ((state.retryCodeCount[lock.id][user as String] = (state.retryCodeCount[lock.id][user as String] ?: 0) + 1) > maxRetries) {
+                                log.info "Retry programming exceeded, assuming user was deleted successfully from the lock"
+                                state.lockCodes[lock.id].remove(user as String)
                             }
 
                             state.expiredNextCode = state.expiredNextCode + 1 // move onto the next code
-                            //log.trace "Scheduled next code check in ${sendDelay > 0 ? sendDelay : 15} seconds"
-                            startTimer((sendDelay > 0 ? sendDelay : 15), codeCheck) // schedule the next code update after a few seconds otherwise it overloads locks and doesn't work
+                            //log.trace "Scheduled next code check in ${sendDelay ?: defaultSendDelay} seconds"
+                            startTimer((sendDelay ?: defaultSendDelay), codeCheck) // schedule the next code update after a few seconds otherwise it overloads locks and doesn't work
 
                             // Last thing to do since it could timeout
                             detailedNotifications ? sendNotifications(msg) : sendNotificationEvent(msg)
@@ -2401,37 +2526,40 @@ def codeCheck() {
 
                         case 'Permanent':
                         if (code != null) {
-                            if (!state.programmedCodes[lock.id].contains(user as String)) {
-                                lock.hasAttribute("maxCodes") ? lock.setCode(user, code, name) : lock.setCode(user, code) // Keep support for older device handlers
+                            if (state.lockCodes[lock.id].(user as String) != code) { // Only if code has changed
+                                setCode(lock, user, code, name)
                                 def msg = "Requesting $lock to add permanent code $name to user $user, code: $code"
                                 log.debug msg
-                                if (disableRetry) {
-                                    log.info "Retry programming disabled, assuming user was added successfully to the lock"
-                                    state.programmedCodes[lock.id].add(user as String)
+                                if ((state.retryCodeCount[lock.id][user as String] = (state.retryCodeCount[lock.id][user as String] ?: 0) + 1) > maxRetries) {
+                                    log.info "Retry programming exceeded, assuming user was added successfully to the lock"
+                                    state.lockCodes[lock.id][user as String] = code
                                 }
 
                                 state.expiredNextCode = state.expiredNextCode + 1 // move onto the next code
-                                //log.trace "Scheduled next code check in ${sendDelay > 0 ? sendDelay : 15} seconds"
-                                startTimer((sendDelay > 0 ? sendDelay : 15), codeCheck) // schedule the next code update after a few seconds otherwise it overloads locks and doesn't work
+                                //log.trace "Scheduled next code check in ${sendDelay ?: defaultSendDelay} seconds"
+                                startTimer((sendDelay ?: defaultSendDelay), codeCheck) // schedule the next code update after a few seconds otherwise it overloads locks and doesn't work
 
                                 // Last thing to do since it could timeout
                                 detailedNotifications ? sendNotifications(msg) : sendNotificationEvent(msg)
                                 return // We are done here, exit out as we've scheduled the next update
                             } else {
+                                if (getCodeName(lock, user) != name) { // If the username has changed update it
+                                        updateCodeName(lock, user, name)
+                                }
                                 log.debug "$lock User $user $name is a permanent code and is already active"
                             }
-                        } else if (state.programmedCodes[lock.id].contains(user as String)) { // Code is null but the list shows programmed, i.e. we were asked to explicit send a delete command to the lock
-                            lock.deleteCode(user)
+                        } else if (state.lockCodes[lock.id].(user as String)) { // Code is null but the list shows programmed, i.e. we were asked to explicit send a delete command to the lock
+                            deleteCode(lock, user)
                             def msg = "Requesting $lock to delete user $user ${name ?: ""}"
                             log.debug msg
-                            if (disableRetry) {
-                                log.info "Retry programming disabled, assuming user was deleted successfully from the lock"
-                                state.programmedCodes[lock.id].remove(user as String)
+                            if ((state.retryCodeCount[lock.id][user as String] = (state.retryCodeCount[lock.id][user as String] ?: 0) + 1) > maxRetries) {
+                                log.info "Retry programming exceeded, assuming user was deleted successfully from the lock"
+                                state.lockCodes[lock.id].remove(user as String)
                             }
 
                             state.expiredNextCode = state.expiredNextCode + 1 // move onto the next code
-                            //log.trace "Scheduled next code check in ${sendDelay > 0 ? sendDelay : 15} seconds"
-                            startTimer((sendDelay > 0 ? sendDelay : 15), codeCheck) // schedule the next code update after a few seconds otherwise it overloads locks and doesn't work
+                            //log.trace "Scheduled next code check in ${sendDelay ?: defaultSendDelay} seconds"
+                            startTimer((sendDelay ?: defaultSendDelay), codeCheck) // schedule the next code update after a few seconds otherwise it overloads locks and doesn't work
 
                             // Last thing to do since it could timeout
                             detailedNotifications ? sendNotifications(msg) : sendNotificationEvent(msg)
@@ -2459,40 +2587,43 @@ def codeCheck() {
                             }
                             
                             if (doAdd) {
-                                if (state.programmedCodes[lock.id].contains(user as String)) {
+                                if (state.lockCodes[lock.id].(user as String) == code) { // If code hasn't changed, don't add it
+                                    if (getCodeName(lock, user) != name) { // If the username has changed update it
+                                        updateCodeName(lock, user, name)
+                                    }
                                     log.debug "$lock presence user $user $name is already active, not adding again"
                                 } else {
-                                    lock.hasAttribute("maxCodes") ? lock.setCode(user, code, name) : lock.setCode(user, code) // Keep support for older device handlers
+                                    setCode(lock, user, code, name)
                                     def msg = "Requesting $lock to add presence based $name to user $user, code: $code"
                                     log.debug msg
-                                    if (disableRetry) {
-                                        log.info "Retry programming disabled, assuming user was added successfully to the lock"
-                                        state.programmedCodes[lock.id].add(user as String)
+                                    if ((state.retryCodeCount[lock.id][user as String] = (state.retryCodeCount[lock.id][user as String] ?: 0) + 1) > maxRetries) {
+                                        log.info "Retry programming exceeded, assuming user was added successfully to the lock"
+                                        state.lockCodes[lock.id][user as String] = code
                                     }
 
                                     state.expiredNextCode = state.expiredNextCode + 1 // move onto the next code
-                                    //log.trace "Scheduled next code check in ${sendDelay > 0 ? sendDelay : 15} seconds"
-                                    startTimer((sendDelay > 0 ? sendDelay : 15), codeCheck) // schedule the next code update after a few seconds otherwise it overloads locks and doesn't work
+                                    //log.trace "Scheduled next code check in ${sendDelay ?: defaultSendDelay} seconds"
+                                    startTimer((sendDelay ?: defaultSendDelay), codeCheck) // schedule the next code update after a few seconds otherwise it overloads locks and doesn't work
 
                                     // Last thing to do since it could timeout
                                     detailedNotifications ? sendNotifications(msg) : sendNotificationEvent(msg)
                                     return // We are done here, exit out as we've scheduled the next update
                                 }
                             } else { // Presence conditions not satisfied
-                                if (!state.programmedCodes[lock.id].contains(user as String)) {
+                                if (!state.lockCodes[lock.id].(user as String)) {
                                     log.debug "$lock presence user $user $name is already inactive, not removing again"
                                 } else {
-                                    lock.deleteCode(user)
+                                    deleteCode(lock, user)
                                     def msg = "Requesting $lock to delete presence based user $user $name"
                                     log.debug msg
-                                    if (disableRetry) {
-                                        log.info "Retry programming disabled, assuming user was deleted successfully from the lock"
-                                        state.programmedCodes[lock.id].remove(user as String)
+                                    if ((state.retryCodeCount[lock.id][user as String] = (state.retryCodeCount[lock.id][user as String] ?: 0) + 1) > maxRetries) {
+                                        log.info "Retry programming exceeded, assuming user was deleted successfully from the lock"
+                                        state.lockCodes[lock.id].remove(user as String)
                                     }
 
                                     state.expiredNextCode = state.expiredNextCode + 1 // move onto the next code
-                                    //log.trace "Scheduled next code check in ${sendDelay > 0 ? sendDelay : 15} seconds"
-                                    startTimer((sendDelay > 0 ? sendDelay : 15), codeCheck) // schedule the next code update after a few seconds otherwise it overloads locks and doesn't work
+                                    //log.trace "Scheduled next code check in ${sendDelay ?: defaultSendDelay} seconds"
+                                    startTimer((sendDelay ?: defaultSendDelay), codeCheck) // schedule the next code update after a few seconds otherwise it overloads locks and doesn't work
 
                                     // Last thing to do since it could timeout
                                     detailedNotifications ? sendNotifications(msg) : sendNotificationEvent(msg)
@@ -2519,40 +2650,43 @@ def codeCheck() {
                             }
                             
                             if (doAdd) {
-                                if (state.programmedCodes[lock.id].contains(user as String)) {
+                                if (state.lockCodes[lock.id].(user as String) == code) { // If code hasn't changed, don't add it
+                                    if (getCodeName(lock, user) != name) { // If the username has changed update it
+                                        updateCodeName(lock, user, name)
+                                    }
                                     log.debug "$lock mode user $user $name is already active, not adding again"
                                 } else {
-                                    lock.hasAttribute("maxCodes") ? lock.setCode(user, code, name) : lock.setCode(user, code) // Keep support for older device handlers
+                                    setCode(lock, user, code, name)
                                     def msg = "Requesting $lock to add mode based $name to user $user, code: $code"
                                     log.debug msg
-                                    if (disableRetry) {
-                                        log.info "Retry programming disabled, assuming user was added successfully to the lock"
-                                        state.programmedCodes[lock.id].add(user as String)
+                                    if ((state.retryCodeCount[lock.id][user as String] = (state.retryCodeCount[lock.id][user as String] ?: 0) + 1) > maxRetries) {
+                                        log.info "Retry programming exceeded, assuming user was added successfully to the lock"
+                                        state.lockCodes[lock.id][user as String] = code
                                     }
 
                                     state.expiredNextCode = state.expiredNextCode + 1 // move onto the next code
-                                    //log.trace "Scheduled next code check in ${sendDelay > 0 ? sendDelay : 15} seconds"
-                                    startTimer((sendDelay > 0 ? sendDelay : 15), codeCheck) // schedule the next code update after a few seconds otherwise it overloads locks and doesn't work
+                                    //log.trace "Scheduled next code check in ${sendDelay ?: defaultSendDelay} seconds"
+                                    startTimer((sendDelay ?: defaultSendDelay), codeCheck) // schedule the next code update after a few seconds otherwise it overloads locks and doesn't work
 
                                     // Last thing to do since it could timeout
                                     detailedNotifications ? sendNotifications(msg) : sendNotificationEvent(msg)
                                     return // We are done here, exit out as we've scheduled the next update
                                 }
                             } else { // Presence conditions not satisfied
-                                if (!state.programmedCodes[lock.id].contains(user as String)) {
+                                if (!state.lockCodes[lock.id].(user as String)) {
                                     log.debug "$lock mode user $user $name is already inactive, not removing again"
                                 } else {
-                                    lock.deleteCode(user)
+                                    deleteCode(lock, user)
                                     def msg = "Requesting $lock to delete mode based user $user $name"
                                     log.debug msg
-                                    if (disableRetry) {
-                                        log.info "Retry programming disabled, assuming user was deleted successfully from the lock"
-                                        state.programmedCodes[lock.id].remove(user as String)
+                                    if ((state.retryCodeCount[lock.id][user as String] = (state.retryCodeCount[lock.id][user as String] ?: 0) + 1) > maxRetries) {
+                                        log.info "Retry programming exceeded, assuming user was deleted successfully from the lock"
+                                        state.lockCodes[lock.id].remove(user as String)
                                     }
 
                                     state.expiredNextCode = state.expiredNextCode + 1 // move onto the next code
-                                    //log.trace "Scheduled next code check in ${sendDelay > 0 ? sendDelay : 15} seconds"
-                                    startTimer((sendDelay > 0 ? sendDelay : 15), codeCheck) // schedule the next code update after a few seconds otherwise it overloads locks and doesn't work
+                                    //log.trace "Scheduled next code check in ${sendDelay ?: defaultSendDelay} seconds"
+                                    startTimer((sendDelay ?: defaultSendDelay), codeCheck) // schedule the next code update after a few seconds otherwise it overloads locks and doesn't work
 
                                     // Last thing to do since it could timeout
                                     detailedNotifications ? sendNotifications(msg) : sendNotificationEvent(msg)
@@ -2563,18 +2697,18 @@ def codeCheck() {
                         break
 
                         case 'Inactive':
-                        if (state.tempTrackDeleteCodes[lock.id].contains(user as String)) { // Since these are permanently deactivated, track them as deleted code
-                            lock.deleteCode(user)
+                        if (state.lockCodes[lock.id].(user as String)) { // Delete the code is hasn't been deleted
+                            deleteCode(lock, user)
                             def msg = "Requesting $lock to delete inactive user $user ${name ?: ""}"
                             log.debug msg
-                            if (disableRetry) {
-                                log.info "Retry programming disabled, assuming user was deleted successfully from the lock"
-                                state.tempTrackDeleteCodes[lock.id].remove(user as String)
+                            if ((state.retryCodeCount[lock.id][user as String] = (state.retryCodeCount[lock.id][user as String] ?: 0) + 1) > maxRetries) {
+                                log.info "Retry programming exceeded, assuming user was deleted successfully from the lock"
+                                state.lockCodes[lock.id].remove(user as String)
                             }
 
                             state.expiredNextCode = state.expiredNextCode + 1 // move onto the next code
-                            //log.trace "Scheduled next code check in ${sendDelay > 0 ? sendDelay : 15} seconds"
-                            startTimer((sendDelay > 0 ? sendDelay : 15), codeCheck) // schedule the next code update after a few seconds otherwise it overloads locks and doesn't work
+                            //log.trace "Scheduled next code check in ${sendDelay ?: defaultSendDelay} seconds"
+                            startTimer((sendDelay ?: defaultSendDelay), codeCheck) // schedule the next code update after a few seconds otherwise it overloads locks and doesn't work
 
                             // Last thing to do since it could timeout
                             detailedNotifications ? sendNotifications(msg) : sendNotificationEvent(msg)
@@ -2585,18 +2719,18 @@ def codeCheck() {
                         break
 
                         default: // No user type selected, it's empty delete code
-                            if (state.tempTrackDeleteCodes[lock.id].contains(user as String)) { // Since these are permanently deactivated, track them as deleted code
-                                lock.deleteCode(user)
+                            if (state.lockCodes[lock.id].(user as String)) { // Delete the code is hasn't been deleted
+                                deleteCode(lock, user)
                                 def msg = "Requesting $lock to delete empty user $user ${name ?: ""}"
                                 log.debug msg
-                                if (disableRetry) {
-                                    log.info "Retry programming disabled, assuming user was deleted successfully from the lock"
-                                    state.tempTrackDeleteCodes[lock.id].remove(user as String)
+                                if ((state.retryCodeCount[lock.id][user as String] = (state.retryCodeCount[lock.id][user as String] ?: 0) + 1) > maxRetries) {
+                                    log.info "Retry programming exceeded, assuming user was deleted successfully from the lock"
+                                    state.lockCodes[lock.id].remove(user as String)
                                 }
 
                                 state.expiredNextCode = state.expiredNextCode + 1 // move onto the next code
-                                //log.trace "Scheduled next code check in ${sendDelay > 0 ? sendDelay : 15} seconds"
-                                startTimer((sendDelay > 0 ? sendDelay : 15), codeCheck) // schedule the next code update after a few seconds otherwise it overloads locks and doesn't work
+                                //log.trace "Scheduled next code check in ${sendDelay ?: defaultSendDelay} seconds"
+                                startTimer((sendDelay ?: defaultSendDelay), codeCheck) // schedule the next code update after a few seconds otherwise it overloads locks and doesn't work
 
                                 // Last thing to do since it could timeout
                                 detailedNotifications ? sendNotifications(msg) : sendNotificationEvent(msg)
@@ -2623,8 +2757,34 @@ def codeCheck() {
         state.expiredLockList.add(lock.id) // reset the state for each lock to be processed
         //log.trace "Added $lock id ${lock.id} back to unprocessed locks list ${state.expiredLockList}"
     }
+}
 
-    runEvery5Minutes(codeCheck) // schedule the next code check in 5 minutes, hopefully runEveryXMinute is more reliable than runIn and runOnce in the long run with v2 hubs
+// Sets the code on the lock and also updates the username
+private setCode(lock, user, code, name) {
+    lock.hasAttribute("maxCodes") ? lock.setCode(user, code, name) : lock.setCode(user, code) // Keep support for older device handlers
+}
+
+// Deletes a code from the lock
+private deleteCode(lock, user) {
+    lock.deleteCode(user)
+}
+
+// Update the name on the lock for a user on a lock
+private updateCodeName(lock, user, name) {
+    if (lock.hasAttribute("maxCodes")) { // Older devices don't have this option
+        lock.setCode(user, null, name)
+    }
+}
+
+// Gets the name of the code on the lock
+private getCodeName(lock, user) {
+    lock.hasAttribute("maxCodes") ? lock.currentState("lockCodes")?.jsonValue."$user" : null // Older handlers don't support this
+}
+
+// Kick start the code check routine
+def kickStart() {
+    schedule("* */1 * * * ?", codeCheck) // run codeCheck every 1 minute
+    codeCheck()
 }
 
 // Heartbeat system to ensure that the MonitorTask doesn't die when it's supposed to be running
@@ -2634,9 +2794,9 @@ def heartBeatMonitor() {
     state.lastHeartBeat = now() // Save the last time we were executed
 
     log.trace "Last code check was done " + ((now() - (state.lastCheck ?: 0))/1000) + " seconds ago"
-    if (((state.lastCheck ?: 0) + (5*60*1000) + (60*1000)) < now()) { // Kick start the motion detection monitor if didn't update for more than 60 seconds beyond the polling period (5 minutes)
+    if (((state.lastCheck ?: 0) + (3*60*1000)) < now()) { // Kick start the motion detection monitor if didn't update for more than 3 minutes
         log.warn "Code check hasn't been run a long time, calling it to kick start it"
-        codeCheck()
+        kickStart()
     }
 }
 
@@ -2659,7 +2819,7 @@ def startTimer(seconds, function, dataMap = null) {
 // settings."userEndTime${x}${i}"
 // settings."userDayOfWeek${x}${i}"
 private checkSchedule(def i, def x) {
-    log.debug "Checking operating schedule $x for user $i"
+    log.trace "Checking operating schedule $x for user $i"
 
     TimeZone timeZone = location.timeZone
     if (!timeZone) {
@@ -2674,7 +2834,7 @@ private checkSchedule(def i, def x) {
     def currentDT = new Date(now())
 
     // some debugging in order to make sure things are working correclty
-    log.debug "Current time: ${currentDT.format("EEE MMM dd yyyy HH:mm z", timeZone)}"
+    log.trace "Current time: ${currentDT.format("EEE MMM dd yyyy HH:mm z", timeZone)}"
 
     // Check if we are within operating times
     if (settings."userStartTime${x}${i}" != null && settings."userEndTime${x}${i}" != null) {
@@ -2686,29 +2846,29 @@ private checkSchedule(def i, def x) {
             //log.trace "Local hour is $localHour"
             if (( localHour >= 0) && (localHour < 12)) // If we between midnight and midday
             {
-                log.debug "End time is before start time and we are past midnight, assuming start time is previous day"
+                log.trace "End time is before start time and we are past midnight, assuming start time is previous day"
                 scheduledStart = scheduledStart.previous() // Get the start time for yesterday
             } else {
-                log.debug "End time is before start time and we are past midday, assuming end time is the next day"
+                log.trace "End time is before start time and we are past midday, assuming end time is the next day"
                 scheduledEnd = scheduledEnd.next() // Get the end time for tomorrow
             }
         }
 
-        log.debug("Operating Start ${scheduledStart.format("HH:mm z", timeZone)}, End ${scheduledEnd.format("HH:mm z", timeZone)}")
+        log.trace "Operating Start ${scheduledStart.format("HH:mm z", timeZone)}, End ${scheduledEnd.format("HH:mm z", timeZone)}"
 
         if (currentDT < scheduledStart || currentDT > scheduledEnd) {
-            log.debug("Outside operating time schedule")
+            log.debug "Outside operating time schedule"
             return false
         }
     }
 
     // Check the condition under which we want this to run now
     // This set allows the most flexibility.
-    log.debug("Operating DOW(s): ${settings."userDayOfWeek${x}${i}"}")
+    log.trace "Operating DOW(s): ${settings."userDayOfWeek${x}${i}"}"
 
-    if(settings."userDayOfWeek${x}${i}" == null) {
-        log.warn "Day of week not specified for operating schedule $x for user $i, assuming no schedule set, so we are within schedule"
-        return true
+    if(!settings."userDayOfWeek${x}${i}") {
+        log.debug "Day of week not specified for operating schedule $x for user $i"
+        return false
     } else if(settings."userDayOfWeek${x}${i}".contains('All Week')) {
         doChange = true
     } else if((settings."userDayOfWeek${x}${i}".contains('Monday') || settings."userDayOfWeek${x}${i}".contains('Monday to Friday')) && currentDayOfWeek == Calendar.instance.MONDAY) {
@@ -2726,7 +2886,6 @@ private checkSchedule(def i, def x) {
     } else if((settings."userDayOfWeek${x}${i}".contains('Sunday') || settings."userDayOfWeek${x}${i}".contains('Saturday & Sunday')) && currentDayOfWeek == Calendar.instance.SUNDAY) {
         doChange = true
     }
-
 
     // If we have hit the condition to schedule this then lets do it
     if(doChange == true){
@@ -2827,3 +2986,7 @@ def checkForCodeUpdate(evt) {
         log.error "Exception while querying latest app version: $e"
     }
 }
+
+// THIS IS THE END OF THE FILE
+
+
