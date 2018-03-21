@@ -21,7 +21,7 @@
 */ 
 
 def clientVersion() {
-    return "07.03.00"
+    return "07.04.00"
 }
 
 /**
@@ -30,6 +30,7 @@ def clientVersion() {
 * Copyright RBoy Apps, redistribution or reuse of code is not allowed without permission
 *
 * Change Log:
+* 2018-3-19 - (v07.04.00) Added support for custom per user notifications, clarified user types text
 * 2018-3-9 - (v07.03.00) Maintain support for the legacy ZWave / JHampstead device handlers, improved tracking of changed codes, added support for limiting number of code use notifications
 * 2018-3-7 - (v07.02.02) Clarify user type descriptions for easier understanding
 * 2018-3-1 - (v07.02.01) Clean up excess users, handle duplicate codes and lost codes better, fix nameSlot notifications
@@ -184,6 +185,20 @@ preferences {
 private getDefaultSendDelay() { 15 }
 private getDefaultRetries() { 5 }
 private getMaxRetries() { retries == null ? defaultRetries : retries }
+private codeOptions() {
+    def ret = [
+        "Permanent": "Permanent",
+        "One time": "One time (burner)",
+        "Expire on": "Start/end date and time",
+        "Scheduled": "Weekly/daily schedule(s)",
+        "Presence": "Activate on user presence",
+        "Modes": "Activate on mode(s)",
+        "Inactive": "Temporarily disabled"
+    ]
+
+    return ret
+}
+
 
 def setupApp() {
     log.trace "$settings"
@@ -235,6 +250,8 @@ def setupApp() {
             paragraph "Enable this to get additional detailed notifications like code programming, lock responses etc. NOTE: this can generate a lot of messages"
             input name: "detailedNotifications", title: "Get detailed notifications", type: "bool", defaultValue: "false", required: false
         }
+        
+        remove("Uninstall")
     }
 }
 
@@ -311,7 +328,7 @@ def unlockLockActionsPage(params) {
 
     log.trace "Lock/Unlock Action Page, user:$user, name:$name, passed params: $params, saved params:$atomicState.params"
 
-    dynamicPage(name:"unlockLockActionsPage", title: "Setup lock/unlock actions for each door" + (user ? " for user $name." : ""), uninstall: false, install: false) {
+    dynamicPage(name:"unlockLockActionsPage", title: (user ? "Setup custom actions/notifications for ${name ?: "user ${user}"}" : "Setup lock/unlock actions for each door"), uninstall: false, install: false) {
         def phrases = location.helloHome?.getPhrases()
         phrases = phrases ? phrases*.label?.sort() - null : [] // Check for null ghost routines
         def showActions = true
@@ -321,7 +338,7 @@ def unlockLockActionsPage(params) {
         section {
             if (user) { // User specific override options
                 paragraph "Enabling custom user actions and notifications will override over the general actions defined on the first page"
-                input "userOverrideUnlockActions${user}", "bool", title: "Define custom actions for $name", required: true,  submitOnChange: true
+                input "userOverrideUnlockActions${user}", "bool", title: "Define custom actions for ${name ?: "user ${user}"}", required: true,  submitOnChange: true
                 if (!settings."userOverrideUnlockActions${user}") { // Check if user has enabled specific override actions then show menu
                     showActions = false
                 }
@@ -360,6 +377,24 @@ def unlockLockActionsPage(params) {
                         href(name: "unlockManualActions", params: hrefParams, title: "Manual Unlock Actions", page: "unlockManualActionsPage", description: "", required: false, image: "http://www.rboyapps.com/images/ManualUnlocked.png")
                         href(name: "lockManualActions", params: hrefParams, title: "Manual Lock Actions", page: "lockManualActionsPage", description: "", required: false, image: "http://www.rboyapps.com/images/ManualLocked.png")
                     }
+                }
+            }
+        }
+        section {
+            if (user) { // User specific override notification options
+                def showCustomNotifications = true
+                input "userOverrideNotifications${user}", "bool", title: "Define custom notifications for ${name ?: "user ${user}"}", required: true,  submitOnChange: true
+                if (!settings."userOverrideNotifications${user}") { // Check if user has enabled specific override actions then show menu
+                    showCustomNotifications = false
+                }
+                if (showCustomNotifications) {
+                    input("recipients${user}", "contact", title: "Send notifications to", multiple: true, required: false, image: "http://www.rboyapps.com/images/Notifications.png") {
+                        paragraph "You can enter multiple phone numbers to send an SMS to by separating them with a '*'. E.g. 5551234567*+448747654321"
+                        input name: "sms${user}", title: "Send SMS notification to (optional):", type: "phone", required: false
+                        paragraph "Enable the below option if you DON'T want push notifications for ${name ?: "user ${user}"} on your SmartThings phone app."
+                        input name: "disableAllNotify${user}", title: "Disable all push notifications for ${name ?: "user ${user}"}", type: "bool", defaultValue: "false", required: true
+                    }
+                    input "audioDevices${user}", "capability.audioNotification", title: "Play notifications on these devices", required: false, multiple: true, image: "http://www.rboyapps.com/images/Horn.png"
                 }
             }
         }
@@ -537,9 +572,6 @@ def lockKeypadActionsPage(params) {
                 if (settings."externalLockNotify${lock}") {
                     input "externalLockNotifyModes${lock}", "mode", title: "Only when in this mode(s) (optional)", required: false, multiple: true
                 }
-            }
-
-            if (!user) { // Users will use the user notify option
                 input "jamNotify${lock}", "bool", title: "Notify on Lock Jam/Stuck", required: false
             }
         }
@@ -1011,7 +1043,7 @@ def userConfigPage(params) {
 
                 case 'Presence':
                     input "userPresent${i}", "capability.presenceSensor", title: "...if any these people are present", description: "Code should be active when any of these people are present", required: false, multiple: true
-                    input "userNotPresent${i}", "capability.presenceSensor", title: "...and none of these people are present", description: "and all these people are not present", required: false, multiple: true
+                    input "userNotPresent${i}", "capability.presenceSensor", title: "...and none of these people are present", description: "when all these people are not present", required: false, multiple: true
                     break
 
                 case 'Modes':
@@ -1025,9 +1057,9 @@ def userConfigPage(params) {
             // Notifications for each user
             input "userNotify${i}", "bool", title: "Notify on use", defaultValue: true, required: false, submitOnChange: true, image: "http://www.rboyapps.com/images/Notifications.png"
             if (priorNotify != false) {
-                input "userNotifyUseCount${i}", "number", title: "...only this many times", required: false, range: "1..*"
+                input "userNotifyUseCount${i}", "number", title: "...limit to only this many times", description: "No limit", required: false, range: "1..*"
                 input "userNotifyModes${i}", "mode", title: "...only when in this mode(s)", description: "Notify only when in any of these modes", required: false, multiple: true
-                input "userXNotifyPresence${i}", "capability.presenceSensor", title: "...and when these people are not present", description: "and none of these people are present", required: false, multiple: true
+                input "userXNotifyPresence${i}", "capability.presenceSensor", title: "...and none of these people are present", description: "when all these people are not present", required: false, multiple: true
             }
 
             // Unlock actions for each user
@@ -1035,7 +1067,7 @@ def userConfigPage(params) {
                 user: i as String, 
                 passed: true 
             ]
-            href(name: "unlockLockActions", params: hrefParams, title: "Custom actions for lock/unlock", page: "unlockLockActionsPage", description: settings."userOverrideUnlockActions${user}" ? "Configured" : "", required: false, image: "http://www.rboyapps.com/images/LockUnlock.png")
+            href(name: "unlockLockActions", params: hrefParams, title: "Custom actions/notifications", page: "unlockLockActionsPage", description: (settings."userOverrideUnlockActions${user}" || settings."userOverrideNotifications${user}") ? "Configured" : "", required: false, image: "http://www.rboyapps.com/images/LockUnlock.png")
         }
     }
 }
@@ -1098,6 +1130,7 @@ def scheduleCodesPage(params) {
             input "userDayOfWeek${schedule}${i}",
                 "enum",
                 title: "Which day of the week?",
+                description: "Everyday",
                 required: false,
                 multiple: true,
                 options: [
@@ -1114,20 +1147,6 @@ def scheduleCodesPage(params) {
                 ]
         }
     }
-}
-
-def codeOptions() {
-    def ret = [
-        "Permanent": "Permanent",
-        "One time": "One time (burner)",
-        "Expire on": "Start/end date and time",
-        "Scheduled": "Recurring schedule(s)",
-        "Presence": "Activate on user presence",
-        "Modes": "Activate on mode(s)",
-        "Inactive": "Temporarily disabled"
-    ]
-
-    return ret
 }
 
 // Check if the lock pin code length match on all the locks
@@ -1942,7 +1961,7 @@ def processUnlockEvent(evt) {
             ) && (
             	!i || (notifyCount ? (state.codeUseCount[lock.id][i as String] <= notifyCount) : true)
         )) {
-            sendNotifications(msg)
+            sendNotifications(msg, settings."userOverrideNotifications${user}" ? user : "")
         }
     }
 }
@@ -1954,7 +1973,9 @@ def processLockEvent(evt) {
     log.trace "Processing $lock lock event: $evt"
 
     def msgs = [] // Message to send
-
+    def lockStr = "" // Individual lock actions
+    def user = "" // User slot used
+    
     if (evt.data) { // Was it locked using a user code
         data = parseJson(evt.data)
     }
@@ -1992,12 +2013,11 @@ def processLockEvent(evt) {
 
     evt.lockMode = lockMode // Save the lockMode calculated
     evt.data = data // Update the data to be passed
-    def user = (data?.usedCode as String) ?: "" // get the user if present
+    user = (data?.usedCode as String) ?: "" // get the user if present
 
     log.trace "$lock locked by user $user $lockMode"
 
     // Check if we have individual actions for each lock
-    def lockStr = ""
     if (settings."individualDoorActions${user}") {
         lockStr = lock as String
     } else {
@@ -2049,7 +2069,7 @@ def processLockEvent(evt) {
 
     // Last thing to do because it can timeout
     for (msg in msgs) {
-        sendNotifications(msg)
+        sendNotifications(msg, settings."userOverrideNotifications${user}" ? user : "")
     }
 }
 
@@ -2255,7 +2275,7 @@ def processLockActions(evt) {
     if (evt.sendNotifications) {
         // Last thing to do because it can timeout
         for (msg1 in msgs) {
-            sendNotifications(msg1)
+            sendNotifications(msg1, settings."userOverrideNotifications${user}" ? user : "")
         }
     } else {
         return msgs
@@ -2361,7 +2381,6 @@ def codeCheck() {
                 def i = state.expiredNextCode
                 def name = settings."userNames${i}"?.trim() // Get the name for the slot and clear and leading or trailing spaces
                 def code = settings."userCodes${i}" as String // Get the code for the slot
-                def notify = settings."userNotify${i}" // Notification setting
                 def userType = settings."userType${i}" // User type
                 def expDate = settings."userExpireDate${i}" // Get the expiration date
                 def expTime = settings."userExpireTime${i}" // Get the expiration time
@@ -2373,7 +2392,7 @@ def codeCheck() {
                 def userLocks = settings."userLocks${i}"
                 def user = i as Integer // which user slot are we using, convert to integer to be sure
 
-                //log.trace "CodeCheck $i, Name: $name, Code: $code, Notify: $notify, UserType: $userType, ExpireDate: $expDate, ExpireTime: $expTime, StartDate: $startDate, StartTime: $startTime, Present: $userPresent, Not Present: $userNotPresent, UserModes: $userModes, Locks: $userLocks"
+                //log.trace "CodeCheck $i, Name: $name, Code: $code, UserType: $userType, ExpireDate: $expDate, ExpireTime: $expTime, StartDate: $startDate, StartTime: $startTime, Present: $userPresent, Not Present: $userNotPresent, UserModes: $userModes, Locks: $userLocks"
 
                 // Check if we have more than one lock and use has not selected this lock for programming then delete it
                 if ((locks?.size() > 1) && userLocks && !userLocks?.contains(lock.displayName)) {
@@ -3059,25 +3078,25 @@ private void sendText(number, message) {
     }
 }
 
-private void sendNotifications(message) {
+private void sendNotifications(message, user = "") {
 	if (!message) {
 		return
     }
     
     if (location.contactBookEnabled) {
-        sendNotificationToContacts(message, recipients)
+        sendNotificationToContacts(message, settings."recipients${user}")
     } else {
-        if (!disableAllNotify) {
+        if (!settings."disableAllNotify${user}") {
             sendPush message
         } else {
             sendNotificationEvent(message)
         }
-        if (sms) {
-            sendText(sms, message)
+        if (settings."sms${user}") {
+            sendText(settings."sms${user}", message)
         }
     }
-    if (audioDevices) {
-        audioDevices*.playText(message)
+    if (settings."audioDevices${user}") {
+        settings."audioDevices${user}"*.playText(message)
     }
 }
 
