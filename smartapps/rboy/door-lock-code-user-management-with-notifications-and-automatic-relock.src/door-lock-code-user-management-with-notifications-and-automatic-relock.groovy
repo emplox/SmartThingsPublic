@@ -21,7 +21,7 @@
 */ 
 
 def clientVersion() {
-    return "07.04.00"
+    return "07.05.04"
 }
 
 /**
@@ -30,6 +30,14 @@ def clientVersion() {
 * Copyright RBoy Apps, redistribution or reuse of code is not allowed without permission
 *
 * Change Log:
+* 2018-5-31 - (v07.05.04) Correct RFID case to capitals
+* 2018-5-29 - (v07.05.03) Save lock id's instead of names when selecting per user locks to avoid issue of renamed locked/locks with similar names (requires users to reselect locks) and use sensor name instead of lock name for reporting open doors
+* 2018-5-11 - (v07.05.02) Update for platform not saving sms settings for individual users
+* 2018-5-1 - (v07.05.01) Patch for removing burner codes when multiple locks are used simultaneously
+* 2018-4-13 - (v07.05.00) Stop tracking lock users after they are moved from the list of programmed locks, added support for Keypad Locks, fixed bug with arming SHM to Home on lock action
+* 2018-4-12 - (v07.04.04) Log/notify if lock failed to program users, show activate/expire time on summary screen
+* 2018-4-7 - (v07.04.03) Improvement to sure programming engine - handle lock programming failures for missed code notifications with retries, this indicates a underlying failure of the mesh
+* 2018-3-26 - (v07.04.02) Check if ST mobile app saved an invalid start time, handle timezone differences between ST mobile app and hub better
 * 2018-3-19 - (v07.04.00) Added support for custom per user notifications, clarified user types text
 * 2018-3-9 - (v07.03.00) Maintain support for the legacy ZWave / JHampstead device handlers, improved tracking of changed codes, added support for limiting number of code use notifications
 * 2018-3-7 - (v07.02.02) Clarify user type descriptions for easier understanding
@@ -205,6 +213,17 @@ def setupApp() {
 
     dynamicPage(name: "setupApp", title: "Lock User Management v${clientVersion()}", install: true, uninstall: true) {
         section("Select Lock(s)") {
+            // Check if the lock pin code length match on all the locks
+            def pinDetails = getLockPinLengthDetails()
+            def pinLen = pinDetails.pinLen // Fixed pin code length
+            def maxPinLen = pinDetails.maxPinLen // Variable minimum pin code length
+            def minPinLen = pinDetails.minPinLen // Variable maximum pin code length
+            def pinLenError = pinDetails.pinLenError
+            log.trace "Configured lock fixed code length: $pinLen, max code length: $maxPinLen, min code length: $minPinLen"
+            if (pinLenError) {
+                def msg = "YOUR LOCKS ARE CONFIGURED TO ACCEPT DIFFERENT CODE DIGIT LENGTHS, PROGRAMMING WILL FAIL!"
+                paragraph title: msg, required: true, ""
+            }
             input "locks","capability.lock", title: "Lock(s)", multiple: true, submitOnChange: true, image: "http://www.rboyapps.com/images/HandleLock.png"
         }
 
@@ -225,8 +244,8 @@ def setupApp() {
                 user: null, 
                 passed: true 
             ]
-            href(name: "unlockLockActions", params: hrefParams, title: "Lock/unlock actions", page: "unlockLockActionsPage", description: "Define actions and notitications when users lock/unlock doors", required: false, image: "http://www.rboyapps.com/images/LockUnlock.png")
-            href(name: "openCloseDoor", title: "Door open/close actions", page: "openCloseDoorPage", description: "Define actions and notitications when users open/close doors", required: false, image: "http://www.rboyapps.com/images/DoorOpenClose.png")
+            href(name: "unlockLockActions", params: hrefParams, title: "Lock/unlock actions", page: "unlockLockActionsPage", description: "", required: false, image: "http://www.rboyapps.com/images/LockUnlock.png")
+            href(name: "openCloseDoor", title: "Door open/close actions", page: "openCloseDoorPage", description: "", required: false, image: "http://www.rboyapps.com/images/DoorOpenClose.png")
 
             input("recipients", "contact", title: "Send notifications to", multiple: true, required: false, image: "http://www.rboyapps.com/images/Notifications.png") {
                 paragraph "You can enter multiple phone numbers to send an SMS to by separating them with a '*'. E.g. 5551234567*+448747654321"
@@ -269,7 +288,6 @@ def openCloseDoorPage() {
                 def priorRelockDoorModes = settings."relockDoorModes${lock}"
                 def priorNotifyBeep = settings."openNotifyBeep${lock}"
 
-                paragraph "\r\n"
                 paragraph title: "Configure ${lock}", required: true, ""
                 if (priorRelockDoor || priorRetractDeadbolt || priorNotifyOpen || priorNotifyBeep) {
                     input "sensor${lock}", "capability.contactSensor", title: "Door open/close sensor", required: ( priorRelockImmediate || priorRetractDeadbolt || priorNotifyOpen || priorNotifyBeep ? true : false) // required for deadbolt, immediate relock or notifications
@@ -279,28 +297,30 @@ def openCloseDoorPage() {
                 if (lock.hasAttribute('autolock') && (lock.latestValue("autolock") == "enabled")) {
                     paragraph title: "Disable AutoLock on physical lock to use SmartApp AutoReLock and AutoUnlock features", required: true, ""
                 } else {
-                    input name: "relockDoor${lock}", type: "bool", title: "Relock door automatically after closing", defaultValue: priorRelockDoor, required: false, submitOnChange: true
+                    input "relockDoor${lock}", "bool", title: "Relock door automatically after closing", defaultValue: priorRelockDoor, required: false, submitOnChange: true
                     if (priorRelockDoor) {
-                        input name: "relockImmediate${lock}", type: "bool", title: "Relock immediately", defaultValue: priorRelockImmediate, required: false, submitOnChange: true
+                        input "relockImmediate${lock}", "bool", title: "Relock immediately", defaultValue: priorRelockImmediate, required: false, submitOnChange: true
                         if (!priorRelockImmediate) {
-                            input name: "relockAfter${lock}", type: "number", title: "Relock after (minutes)", defaultValue: priorRelockAfter, required: true                   
+                            input "relockAfter${lock}", "number", title: "Relock after (minutes)", defaultValue: priorRelockAfter, required: true                   
                         }
-                        input name: "relockDoorModes${lock}", type: "mode", title: "...only when in this mode(s) (optional)", defaultValue: priorRelockDoorModes, required: false, multiple: true
+                        input "relockDoorModes${lock}", "mode", title: "...only when in this mode(s) (optional)", defaultValue: priorRelockDoorModes, required: false, multiple: true
                     }
                     if (priorRetractDeadbolt) {
                         paragraph "NOTE: Make sure the AutoLock feature on the lock is disabled to avoid an infinite locking/unlocking loop.", required: false, submitOnChange: true
                     }
-                    input name: "retractDeadbolt${lock}", type: "bool", title: "Unlock door if locked while open", defaultValue: priorRetractDeadbolt, description: "This retracts the deadbolt if it extends while the door is still open", required: false, submitOnChange: true
+                    input "retractDeadbolt${lock}", "bool", title: "Unlock door if locked while open", defaultValue: priorRetractDeadbolt, description: "This retracts the deadbolt if it extends while the door is still open", required: false, submitOnChange: true
                 }
 
                 input "openNotifyBeep${lock}", "capability.tone", title: "Ring chime when door is opened", multiple: true, required: false, submitOnChange: true
-                input name: "openNotify${lock}", type: "bool", title: "Notify if door has been left open", defaultValue: priorNotifyOpen, required: false, submitOnChange: true
+                input "openNotify${lock}", "bool", title: "Notify if door has been left open", defaultValue: priorNotifyOpen, required: false, submitOnChange: true
                 if (priorNotifyOpen) {
-                    input name: "openNotifyTimeout${lock}", type: "number", title: "...for (minutes)", defaultValue: priorNotifyOpenTimeout, required: true, range: "1..*"
+                    input "openNotifyTimeout${lock}", "number", title: "...for (minutes)", defaultValue: priorNotifyOpenTimeout, required: true, range: "1..*"
                 }
                 if (priorNotifyOpen || priorNotifyBeep) {
-                    input name: "openNotifyModes${lock}", type: "mode", title: "...only when in this mode(s) (optional)", defaultValue: priorOpenNotifyModes, required: false, multiple: true
+                    input "openNotifyModes${lock}", "mode", title: "...only when in this mode(s) (optional)", defaultValue: priorOpenNotifyModes, required: false, multiple: true
                 }
+
+                paragraph "\r\n"
             }
         }
     }
@@ -390,9 +410,9 @@ def unlockLockActionsPage(params) {
                 if (showCustomNotifications) {
                     input("recipients${user}", "contact", title: "Send notifications to", multiple: true, required: false, image: "http://www.rboyapps.com/images/Notifications.png") {
                         paragraph "You can enter multiple phone numbers to send an SMS to by separating them with a '*'. E.g. 5551234567*+448747654321"
-                        input name: "sms${user}", title: "Send SMS notification to (optional):", type: "phone", required: false
+                        input "sms${user}", "phone", title: "Send SMS notification to (optional):", required: false
                         paragraph "Enable the below option if you DON'T want push notifications for ${name ?: "user ${user}"} on your SmartThings phone app."
-                        input name: "disableAllNotify${user}", title: "Disable all push notifications for ${name ?: "user ${user}"}", type: "bool", defaultValue: "false", required: true
+                        input "disableAllNotify${user}", "bool", title: "Disable all push notifications for ${name ?: "user ${user}"}", defaultValue: "false", required: true
                     }
                     input "audioDevices${user}", "capability.audioNotification", title: "Play notifications on these devices", required: false, multiple: true, image: "http://www.rboyapps.com/images/Horn.png"
                 }
@@ -440,7 +460,12 @@ def unlockKeypadActionsPage(params) {
             paragraph "Run these actions when a user successfully unlocks the door using a code"
             input "homePhrase${lock}${user}", "enum", title: "Run routine", required: false, options: phrases, defaultValue: priorHomePhrase
             input "homeMode${lock}${user}", "mode", title: "Change mode to", required: false, multiple: false, defaultValue: priorHomeMode
-            input "homeDisarm${lock}${user}", "bool", title: "Disarm Smart Home Monitor", required: false
+            if (lock ? (locks.find{ it.name == lock }?.hasAttribute("armMode") ? !settings."keypadArmDisarm${lock}${user}" : true) : true) { // Hide only if we have have a supported keypad for selected lock and using keypad to control SHM
+                input "homeDisarm${lock}${user}", "bool", title: "Disarm Smart Home Monitor", required: false
+            }
+            if ((lock ? locks.find { it.name == lock } : locks)?.any { keypad -> keypad.hasAttribute("armMode") }) { // Show only if we have a supported keypad (for selected lock or for general settings)
+                input "keypadArmDisarm${lock}${user}", "bool", title: "Control Smart Home Monitor using keypad", required: false, submitOnChange: (lock ? true : false)
+            }
             input "turnOnSwitchesAfterSunset${lock}${user}", "capability.switch", title: "Turn on light(s) after dark", required: false, multiple: true
             input "turnOnSwitches${lock}${user}", "capability.switch", title: "Turn on switch(s)", required: false, multiple: true
             input "turnOffSwitches${lock}${user}", "capability.switch", title: "Turn off switch(s)", required: false, multiple: true
@@ -548,9 +573,14 @@ def lockKeypadActionsPage(params) {
             paragraph "Some locks can be locked from the keypad outside${user ? " with user codes" : ""}. If your lock has his feature then you can assign actions to execute when it is locked ${user ? "with a user code" : "from the keypad"}"
             input "externalLockPhrase${lock}${user}", "enum", title: "Run routine", required: false, options: phrases, defaultValue: priorLockPhrase
             input "externalLockMode${lock}${user}", "mode", title: "Change mode to", required: false, multiple: false, defaultValue: priorHomeMode
-            input "homeArm${lock}${user}", "bool", title: "Arm Smart Home Monitor to Away", required: false, submitOnChange: true
-            if (settings."homeArm${lock}${user}") {
-                input "homeArmStay${lock}${user}", "bool", title: "...arm to Home instead of Away", required: false
+            if (lock ? (locks.find{ it.name == lock }?.hasAttribute("armMode") ? !settings."keypadArmDisarm${lock}${user}" : true) : true) { // Hide only if we have have a supported keypad for selected lock and using keypad to control SHM
+                input "homeArm${lock}${user}", "bool", title: "Arm Smart Home Monitor to Away", required: false, submitOnChange: true
+                if (settings."homeArm${lock}${user}") {
+                    input "homeArmStay${lock}${user}", "bool", title: "...arm to Stay instead of Away", required: false
+                }
+            }
+            if ((lock ? locks.find { it.name == lock } : locks)?.any { keypad -> keypad.hasAttribute("armMode") }) { // Show only if we have a supported keypad (for selected lock or for general settings)
+                input "keypadArmDisarm${lock}${user}", "bool", title: "Control Smart Home Monitor using keypad", required: false, submitOnChange: (lock ? true : false)
             }
             input "externalLockTurnOnSwitches${lock}${user}", "capability.switch", title: "Turn on switch(s)", required: false, multiple: true
             input "externalLockTurnOffSwitches${lock}${user}", "capability.switch", title: "Turn off switch(s)", required: false, multiple: true
@@ -559,7 +589,7 @@ def lockKeypadActionsPage(params) {
 
             input "delayLockActions${lock}${user}", "bool", title: "Delay running lock actions", required: false, submitOnChange: true
             if (settings."delayLockActions${lock}${user}") {
-                input name: "delayLockActionsTime${lock}${user}", type: "number", title: "...by (minutes)", defaultValue: settings."delayLockActionsTime${lock}${user}", required: true, range: "1..*"
+                input "delayLockActionsTime${lock}${user}", "number", title: "...by (minutes)", defaultValue: settings."delayLockActionsTime${lock}${user}", required: true, range: "1..*"
             }
 
             paragraph title: "Do NOT run the above lock actions for door${lock ? " $lock" : ""} under any of the following conditions", required: true, ""
@@ -611,7 +641,7 @@ def lockManualActionsPage(params) {
 
             input "externalLockPhraseManual${lock}", "enum", title: "Run routine", required: false, options: phrases, defaultValue: priorLockPhrase
             input "externalLockModeManual${lock}", "mode", title: "Change mode to", required: false, multiple: false, defaultValue: priorHomeMode
-            input "homeArmManual${lock}", "bool", title: "Arm Smart Home Monitor to Home", required: false
+            input "homeArmManual${lock}", "bool", title: "Arm Smart Home Monitor to Stay", required: false
             input "externalLockTurnOnSwitchesManual${lock}", "capability.switch", title: "Turn on switch(s)", required: false, multiple: true
             input "externalLockTurnOffSwitchesManual${lock}", "capability.switch", title: "Turn off switch(s)", required: false, multiple: true
             input "lockLocksManual${lock}","capability.lock", title: "Lock lock(s)", required: false, multiple: true
@@ -619,7 +649,7 @@ def lockManualActionsPage(params) {
 
             input "delayLockActionsManual${lock}", "bool", title: "Delay running lock actions", required: false, submitOnChange: true
             if (settings."delayLockActionsManual${lock}") {
-                input name: "delayLockActionsTimeManual${lock}", type: "number", title: "...by (minutes)", defaultValue: settings."delayLockActionsTimeManual${lock}", required: true, range: "1..*"
+                input "delayLockActionsTimeManual${lock}", "number", title: "...by (minutes)", defaultValue: settings."delayLockActionsTimeManual${lock}", required: true, range: "1..*"
             }
 
             paragraph title: "Do NOT run the above lock actions for door${lock ? " $lock" : ""} under any of the following conditions", required: true, ""
@@ -674,12 +704,11 @@ def usersPage() {
                 def priorStartDate = settings."userStartDate${i}"
                 def priorStartTime = settings."userStartTime${i}"
                 def priorUserType = settings."userType${i}"
-                def priorLocks = settings."userLocks${i}"
                 def invalidStartDate = false
                 def invalidExpiryDate = false
                 def userSummary = ""
                 def userSlotActive = true
-                //log.trace "Initial $i Name: $priorName, Code: $priorCode, Notify: $priorNotify, NotifyModes: $priorNotifyModes, ExpireDate: $priorExpireDate, ExpireTime: $priorExpireTime, StartDate: $priorStartDate, StartTime: $priorStartTime, UserType: $priorUserType, Locks: $priorLocks"
+                //log.trace "Initial $i Name: $priorName, Code: $priorCode, Notify: $priorNotify, NotifyModes: $priorNotifyModes, ExpireDate: $priorExpireDate, ExpireTime: $priorExpireTime, StartDate: $priorStartDate, StartTime: $priorStartTime, UserType: $priorUserType"
 
                 // Check for errors and display messages
                 if (pinLenError) {
@@ -705,9 +734,9 @@ def usersPage() {
                     }
 
                     // Check if the lock pin code length match the pin code length entered by the user
-                    def userLocks = settings."userLocks${i}" ?: locks*.displayName // Use the defined locks or if not defined then check all locks
+                    def userLocks = settings."userLocks${i}" ?: locks*.id // Use the defined locks or if not defined then check all locks
                     for (lock in locks) {
-                        if (userLocks?.contains(lock.displayName) && (pinLen || (maxPinLen && minPinLen))) { // Check if the lock support reporting pin length and it has a valid number to report (not 0 or null)
+                        if (userLocks?.contains(lock.id) && (pinLen || (maxPinLen && minPinLen))) { // Check if the lock support reporting pin length and it has a valid number to report (not 0 or null)
                             if ((priorCode?.size() > 0) && (pinLen ? pinLen != priorCode.size() : ((priorCode.size() < minPinLen) || (priorCode.size() > maxPinLen)))) { // If we have a code to program
                                 def msg = "YOUR LOCK IS CONFIGURED TO ACCEPT ${pinLen ?: "${minPinLen}-${maxPinLen}"} DIGIT CODES ONLY, PROGRAMMING WILL FAIL!"
                                 log.warn msg
@@ -723,10 +752,9 @@ def usersPage() {
                             if (priorStartDate) {
                                 //log.trace "Found start date in setup"
                                 try {
-                                    String dst = timeZone.getDisplayName(timeZone.inDaylightTime(new Date(now())), TimeZone.SHORT) // Keep current timezone
-                                    def df = new java.text.SimpleDateFormat("yyyy-MM-dd Z")     
+                                    def df = new java.text.SimpleDateFormat("yyyy-MM-dd")
                                     df.setLenient(false) // we want strict formatting
-                                    df.parse(priorStartDate + " " + dst)
+                                    df.parse(priorStartDate)
                                     invalidStartDate = false
                                 }
                                 catch (Exception e) {
@@ -737,10 +765,9 @@ def usersPage() {
                             if (priorExpireDate) {
                                 //log.trace "Found expiry date in setup"
                                 try {
-                                    String dst = timeZone.getDisplayName(timeZone.inDaylightTime(new Date(now())), TimeZone.SHORT) // Keep current timezone
-                                    def df = new java.text.SimpleDateFormat("yyyy-MM-dd Z")     
+                                    def df = new java.text.SimpleDateFormat("yyyy-MM-dd")
                                     df.setLenient(false) // we want strict formatting
-                                    df.parse(priorExpireDate + " " + dst)
+                                    df.parse(priorExpireDate)
                                     invalidExpiryDate = false // We passed it's a valid date
                                 }
                                 catch (Exception e) {
@@ -753,33 +780,28 @@ def usersPage() {
                                 if (priorExpireDate) {
                                     def expired = false
                                     if (priorExpireTime) {
-                                        def midnightToday = timeToday("2000-01-01T00:00:00.000-0000", timeZone)
-                                        String dst = timeZone.getDisplayName(timeZone.inDaylightTime(new Date(now())), TimeZone.SHORT) // Keep current timezone
-                                        def expT = (timeToday(priorExpireTime, timeZone).time - midnightToday.time)
-                                        def expD = Date.parse("yyyy-MM-dd Z", priorExpireDate + " " + dst)
-                                        def exp = expD.getTime() + expT
-                                        if (exp < now()) {
+                                        // Parse the entire date/time including timezone since the Date object is converted and stored in UTC internally
+                                        def exp = Date.parse("yyyy-MM-ddHH:mmZ", priorExpireDate + timeToday(priorExpireTime, timeZone).format("HH:mmZ", timeZone))
+                                        if (exp.getTime() < now()) {
                                             def msg = "Code EXPIRED!"
                                             userSummary += (userSummary ? "\n" : "") + msg
                                             expired = true
                                             userSlotActive = false
                                         } else {
-                                            if (priorStartDate && !expired) {
-                                                def sD = Date.parse("yyyy-MM-dd Z", priorStartDate + " " + dst)
-                                                def sT = (timeToday(priorStartTime, timeZone).time - midnightToday.time)
-                                                def sta = sD.getTime() + sT
-                                                if (sta > now()) {                                                
-                                                    def msg = "Activates on ${sD.format("EEE MMM dd yyyy")}"
+                                            if (priorStartDate && priorStartTime && !expired) {
+                                                def start = Date.parse("yyyy-MM-ddHH:mmZ", priorStartDate + timeToday(priorStartTime, timeZone).format("HH:mmZ", timeZone))
+                                                if (start.getTime() > now()) {                                                
+                                                    def msg = "Activates ${start.format("EEE MMM dd HH:mm", timeZone)}"
                                                     userSummary += (userSummary ? "\n" : "") + msg
                                                 }
                                             }
-                                            def msg = "Expires on ${expD.format("EEE MMM dd yyyy")}"
+                                            def msg = "Expires ${exp.format("EEE MMM dd HH:mm", timeZone)}"
                                             userSummary += (userSummary ? "\n" : "") + msg
                                         }
                                     }
                                 }
                             } else {
-                                def msg = "EXPIRY: INVALID Date!"
+                                def msg = "INVALID Date!"
                                 userSummary += (userSummary ? "\n" : "") + msg
                                 userSlotActive = false
                             }
@@ -891,10 +913,9 @@ def userConfigPage(params) {
             def priorStartDate = settings."userStartDate${i}"
             def priorStartTime = settings."userStartTime${i}"
             def priorUserType = settings."userType${i}"
-            def priorLocks = settings."userLocks${i}"
             def invalidStartDate = false
             def invalidExpiryDate = false
-            log.trace "Initial $i Name: $priorName, Code: $priorCode, Notify: $priorNotify, NotifyModes: $priorNotifyModes, ExpireDate: $priorExpireDate, ExpireTime: $priorExpireTime, StartDate: $priorStartDate, StartTime: $priorStartTime, UserType: $priorUserType, Locks: $priorLocks"
+            log.trace "Initial $i Name: $priorName, Code: $priorCode, Notify: $priorNotify, NotifyModes: $priorNotifyModes, ExpireDate: $priorExpireDate, ExpireTime: $priorExpireTime, StartDate: $priorStartDate, StartTime: $priorStartTime, UserType: $priorUserType"
 
             // Check for errors and display messages
             if (pinLenError) {
@@ -918,9 +939,9 @@ def userConfigPage(params) {
                 }
 
                 // Check if the lock pin code length match the pin code length entered by the user
-                def userLocks = settings."userLocks${i}" ?: locks*.displayName // Use the defined locks or if not defined then check all locks
+                def userLocks = settings."userLocks${i}" ?: locks*.id // Use the defined locks or if not defined then check all locks
                 for (lock in locks) {
-                    if (userLocks?.contains(lock.displayName) && (pinLen || (maxPinLen && minPinLen))) { // Check if the lock support reporting pin length and it has a valid number to report (not 0 or null)
+                    if (userLocks?.contains(lock.id) && (pinLen || (maxPinLen && minPinLen))) { // Check if the lock support reporting pin length and it has a valid number to report (not 0 or null)
                         if ((priorCode?.size() > 0) && (pinLen ? pinLen != priorCode.size() : ((priorCode.size() < minPinLen) || (priorCode.size() > maxPinLen)))) { // If we have a code to program
                             def msg = "YOUR LOCK IS CONFIGURED TO ACCEPT ${pinLen ?: "${minPinLen}-${maxPinLen}"} DIGIT CODES ONLY, PROGRAMMING WILL FAIL!"
                             paragraph title: msg, required: true, ""
@@ -935,10 +956,9 @@ def userConfigPage(params) {
                         if (priorStartDate) {
                             //log.trace "Found start date in setup"
                             try {
-                                String dst = timeZone.getDisplayName(timeZone.inDaylightTime(new Date(now())), TimeZone.SHORT) // Keep current timezone
-                                def df = new java.text.SimpleDateFormat("yyyy-MM-dd Z")     
+                                def df = new java.text.SimpleDateFormat("yyyy-MM-dd")
                                 df.setLenient(false) // we want strict formatting
-                                log.trace "Start:" + df.parse(priorStartDate + " " + dst)
+                                log.trace "Start:" + df.parse(priorStartDate)
                                 invalidStartDate = false
                             }
                             catch (Exception e) {
@@ -949,10 +969,9 @@ def userConfigPage(params) {
                         if (priorExpireDate) {
                             //log.trace "Found expiry date in setup"
                             try {
-                                String dst = timeZone.getDisplayName(timeZone.inDaylightTime(new Date(now())), TimeZone.SHORT) // Keep current timezone
-                                def df = new java.text.SimpleDateFormat("yyyy-MM-dd Z")     
+                                def df = new java.text.SimpleDateFormat("yyyy-MM-dd")
                                 df.setLenient(false) // we want strict formatting
-                                log.trace "Expire:" + df.parse(priorExpireDate + " " + dst)
+                                log.trace "Expire:" + df.parse(priorExpireDate)
                                 invalidExpiryDate = false // We passed it's a valid date
                             }
                             catch (Exception e) {
@@ -965,22 +984,17 @@ def userConfigPage(params) {
                             if (priorExpireDate) {
                                 def expired = false
                                 if (priorExpireTime) {
-                                    def midnightToday = timeToday("2000-01-01T00:00:00.000-0000", timeZone)
-                                    String dst = timeZone.getDisplayName(timeZone.inDaylightTime(new Date(now())), TimeZone.SHORT) // Keep current timezone
-                                    def expT = (timeToday(priorExpireTime, timeZone).time - midnightToday.time)
-                                    def expD = Date.parse("yyyy-MM-dd Z", priorExpireDate + " " + dst)
-                                    def exp = expD.getTime() + expT
-                                    if (exp < now()) {
+                                    // Parse the entire date/time including timezone since the Date object is converted and stored in UTC internally
+                                    def exp = Date.parse("yyyy-MM-ddHH:mmZ", priorExpireDate + timeToday(priorExpireTime, timeZone).format("HH:mmZ", timeZone))
+                                    if (exp.getTime() < now()) {
                                         paragraph title: "Code EXPIRED!", required: true, ""
                                         expired = true
                                     } else {
-                                        if (priorStartDate && !expired) {
-                                            def sD = Date.parse("yyyy-MM-dd Z", priorStartDate + " " + dst)
-                                            def sT = (timeToday(priorStartTime, timeZone).time - midnightToday.time)
-                                            def sta = sD.getTime() + sT
-                                            if (sta > now()) {                                                
-                                                def staStr = (new Date(sta.value)).format("EEE MMM dd yyyy HH:mm z", timeZone)
-                                                paragraph title: "Code activates on ${staStr}", required: true, ""
+                                        if (priorStartDate && priorStartTime && !expired) {
+                                            def start = Date.parse("yyyy-MM-ddHH:mmZ", priorStartDate + timeToday(priorStartTime, timeZone).format("HH:mmZ", timeZone))
+                                            if (start.getTime() > now()) {
+                                                def startStr = start.format("EEE MMM dd yyyy HH:mm z", timeZone)
+                                                paragraph title: "Code activates on ${startStr}", required: true, ""
                                             }
                                         }
                                     }
@@ -1006,7 +1020,7 @@ def userConfigPage(params) {
 
             // Lock selection
             if (locks?.size() > 1) {
-                input "userLocks${i}", "enum", description: "Select locks", title: "Only on these lock(s) (optional)", options: (locks*.displayName).sort(), multiple: true, required: false, image: "http://www.rboyapps.com/images/HandleLock.png"
+                input "userLocks${i}", "enum", description: "Select locks", title: "Only on these lock(s) (optional)", options: selectLocks, multiple: true, required: false, image: "http://www.rboyapps.com/images/HandleLock.png"
             }
 
             // User Type (Permanent, One Time, Scheduled, etc)
@@ -1072,13 +1086,17 @@ def userConfigPage(params) {
     }
 }
 
+private getSelectLocks() {
+    return (locks?.collectEntries { [ (it.id) : (it.displayName) ] })?.sort { it.value.toLowerCase() } // Get lock_id:lock_name and sort by name
+}
+
 private getUserScheduleDescription(i, schedule, timeZone) {
     def retVal = "Not defined"
     if (settings."userDayOfWeek${schedule}${i}") {
         retVal = ""
         settings."userDayOfWeek${schedule}${i}".each { retVal += (retVal ? ", " : "") + it }// DOW
-        retVal += ": " + (settings."userStartTime${schedule}${i}" ? (new Date(timeToday(settings."userStartTime${schedule}${i}", timeZone).time)).format("HH:mm z", timeZone) : "") // Start Time
-        retVal += " - " + (settings."userEndTime${schedule}${i}" ? (new Date(timeToday(settings."userEndTime${schedule}${i}", timeZone).time)).format("HH:mm z", timeZone) : "") // EndTime
+        retVal += ": " + (settings."userStartTime${schedule}${i}" ? timeToday(settings."userStartTime${schedule}${i}", timeZone).format("HH:mm z", timeZone) : "") // Start Time
+        retVal += " - " + (settings."userEndTime${schedule}${i}" ? timeToday(settings."userEndTime${schedule}${i}", timeZone).format("HH:mm z", timeZone) : "") // EndTime
     }
     return retVal
 }
@@ -1130,7 +1148,7 @@ def scheduleCodesPage(params) {
             input "userDayOfWeek${schedule}${i}",
                 "enum",
                 title: "Which day of the week?",
-                description: "Everyday",
+                description: "Not defined",
                 required: false,
                 multiple: true,
                 options: [
@@ -1229,12 +1247,12 @@ def appTouch() {
         }
         
         // Check if the lock pin code length match the pin code length entered by the user
-        def userLocks = settings."userLocks${i}" ?: locks*.displayName // Use the defined locks or if not defined then check all locks
+        def userLocks = settings."userLocks${i}" ?: locks*.id // Use the defined locks or if not defined then check all locks
         for (lock in locks) {
             def codeLen = lock.hasAttribute("pinLength") ? lock.currentValue("pinLength") : (lock.hasAttribute("codeLength") ? lock.currentValue("codeLength") : null)
             def maxCodeLen = lock.hasAttribute("maxPINLength") ? lock.currentValue("maxPINLength") : null
             def minCodeLen = lock.hasAttribute("minPINLength") ? lock.currentValue("minPINLength") : null
-            if (userLocks?.contains(lock.displayName) && (codeLen || (maxCodeLen && minCodeLen))) { // Check if the lock support reporting pin length and it has a valid number to report (not 0 or null)
+            if (userLocks?.contains(lock.id) && (codeLen || (maxCodeLen && minCodeLen))) { // Check if the lock support reporting pin length and it has a valid number to report (not 0 or null)
                 if ((code1?.size() > 0) && (codeLen ? codeLen != code1.size() : ((code1.size() < minCodeLen) || (code1.size() > maxCodeLen)))) { // If we have a code to program
                     def msg = "CODE LENGTH DOES NOT MATCH LOCK PROGRAMMING LENGTH, PROGRAMMING WILL FAIL - USER $name1 IN SLOT $i REQUIRES ${codeLen ?: "${minCodeLen}-${maxCodeLen}"} DIGITS FOR LOCK ${lock}"
                     log.error msg
@@ -1310,6 +1328,12 @@ def appTouch() {
         state.expiredLockList.add(lock.id) // reset the state for each lock to be processed with expired
         //log.trace "Added $lock id ${lock.id} to unprocessed locks update list ${state.updateLockList} and expire list ${state.expiredLockList}"
     }
+    state.lockCodes.each { lockID, userMap ->
+        if (!locks?.any { lock -> lock.id == lockID }) {
+            log.debug "Lock with ID ${lockID} is no longer being programmed, stop tracking users from the lock"
+            state.lockCodes[lockID] = [:] /// Stop tracking codes from this lock once we exclude the lock from our main list
+        }
+    }        
     state.updateNextCode = 1 // set next code to be set for the update loop
     state.expiredNextCode = 1 // set next code to be set for the expired loop
 
@@ -1518,7 +1542,7 @@ def notifyOpenDoor() {
                 atomicState.notifyOpenDoors = notifyOpenDoors // set it back to atomicState
             } else {
                 log.info "Sensor ${lockSensor} is reporting door ${lock} is open, notifying user and checking again after ${settings."openNotifyTimeout${lock}"} minutes"
-                def msg = "$lock has been open for ${settings."openNotifyTimeout${lock}"} minutes"
+                def msg = "$lockSensor has been open for ${settings."openNotifyTimeout${lock}"} minutes"
 
                 //log.trace "Updating ${lock.id} timestamp in the list of notifyOpenDoors"
                 def notifyOpenDoors = atomicState.notifyOpenDoors // We need to deference the atomicState object each time, https://community.smartthings.com/t/atomicstate-not-working/27827/6?u=rboy
@@ -1588,9 +1612,7 @@ def codeResponse(evt) {
         case "failed":
         	if (desc?.contains("duplicate")) { // DTH inaccurately reports some failed programming codes as duplicate so check extended event for real reason
                 type = "duplicate"
-            } else {
-                type = "added" // This a case where the code reponse was lost or duplicate so when adding another user it rejects it, we never received the confirmation so check if have a pending user to add
-            }
+            } // If a previous code reponse notification was lost it will report failed, but don't try to add it because a genuine failure cannot be captures. This is an issue to lock communication with z-wave mesh which needs to be addressed
             break
             
         case "renamed":
@@ -1622,6 +1644,13 @@ def codeResponse(evt) {
     
     def currentCode = settings."userCodes${user}" as String
 
+    if (!(state.lockCodes[lock.id].(user as String)) && (type == "failed")) { // Only process duplicate code notitications if the user is not already programmed in our list
+        def msg = "$lock failed to add user $user. Retrying again"
+        log.warn msg
+        detailedNotifications ? sendNotifications(msg) : sendNotificationEvent(msg) // It can fail if the user was added by other means, so we only report if needed
+        return // We're done here
+    }
+    
     if (!(state.lockCodes[lock.id].(user as String)) && (type == "duplicate")) { // Only process duplicate code notitications if the user is not already programmed in our list
         def msg = "$lock reported user $user is a duplicate code! Please clear extra codes from your lock"
         log.warn msg
@@ -1676,8 +1705,10 @@ def lockHandler(evt) {
 
     if (evt.name == "lock") { // LOCK UNLOCK EVENTS
         if (evt.value == "unlocked") { // UNLOCKED
+            unschedule(processLockActions) // If there was a pending delayed actions and user operated the lock then cancel it
             processUnlockEvent(evtMap)
         } else if (evt.value == "locked") { // LOCKED MANUALLY OR VIA KEYPAD OR ELECTRONICALLY
+            unschedule(processLockActions) // If there was a pending delayed actions and user operated the lock then cancel it
             processLockEvent(evtMap)
         } else if (evt.value == "unknown") { // JAMMED CODE EVENT
             log.debug "Lock $evt.displayName Jammed!"
@@ -1731,7 +1762,7 @@ def processUnlockEvent(evt) {
         break
 
         case "rfid":
-        lockMode = "via rfid"
+        lockMode = "via RFID"
         break
 
         case "bluetooth":
@@ -1755,7 +1786,7 @@ def processUnlockEvent(evt) {
             break
     }
 
-    if ((data?.usedCode == null) && !(["keypad", "rfid"].any { lockMode?.contains(it) })) { // No extended data, must be a manual/auto/keyed unlock, NOTE: some locks don't send keypad user codes
+    if ((data?.usedCode == null) && !(["keypad", "rfid"].any { lockMode?.toLowerCase().contains(it) })) { // No extended data, must be a manual/auto/keyed unlock, NOTE: some locks don't send keypad user codes
         log.trace "$evt.displayName was unlocked manually. Source type: $lockMode"
 
         // Check if we have individual actions for each lock
@@ -1880,7 +1911,22 @@ def processUnlockEvent(evt) {
         } else if (settings."runXModeUnlockActions${lockStr}${user}"?.find{it == location.mode}) {
             log.trace "Current mode is ${location.mode}, not running unlock actions for door $lock"
         } else {
-            if (settings."homeDisarm${lockStr}${user}") {
+            // If we have a specific mode passed by the keypad lets use that otherwise use configured options
+            if (settings."keypadArmDisarm${lockStr}${user}" && (data instanceof org.codehaus.groovy.grails.web.json.JSONObject ? !data?.isNull("armMode") : (data?.armMode != null))) { // NOTE: Bug with ST, runIn passes a JSONObject instead of a map - https://community.smartthings.com/t/runin-json-vs-map/104442
+                switch (data.armMode) { // Set Keypad lock state
+                    case "disarmed":
+                    	log.info "Disarming Smart Home Monitor"
+                    	sendLocationEvent(name: "alarmSystemStatus", value: "off") // First do this to avoid false alerts from a slow platform
+                        lock.setDisarmed()
+                        msg += detailedNotifications ? ", disarming Smart Home Monitor" : ""
+                    	break
+                        
+                    default:
+                        log.warn "Invalid SHM mode detected: ${data.armMode}"
+                        msg += ", invalid Smart Home Monitor mode ${data.armMode}"
+                        break
+                }
+            } else if (settings."homeDisarm${lockStr}${user}") {
                 log.info "Disarming Smart Home Monitor"
                 sendLocationEvent(name: "alarmSystemStatus", value: "off") // First do this to avoid false alerts from a slow platform
                 msg += detailedNotifications ? ", disarming Smart Home Monitor" : ""
@@ -1941,7 +1987,7 @@ def processUnlockEvent(evt) {
         // Check for one time codes and disable them if required
         def userType = settings."userType${i}" // User type
         def userLocks = settings."userLocks${i}" // Configured locks
-        if (((locks?.size() == 1) || userLocks?.contains(lock.displayName)) && (userType == 'One time')) {
+        if (((locks?.size() == 1) || !userLocks || userLocks?.contains(lock.id)) && (userType == 'One time')) {
             if (!state.usedOneTimeCodes[lock.id].contains(i as String)) {
                 log.trace "Marking one time code as used and requesting removal from lock"
                 state.usedOneTimeCodes[lock.id].add(i as String) // mark the user slot used
@@ -1987,7 +2033,7 @@ def processLockEvent(evt) {
         break
 
         case "rfid":
-        lockMode = "via rfid"
+        lockMode = "via RFID"
         break
 
         case "bluetooth":
@@ -2014,8 +2060,13 @@ def processLockEvent(evt) {
     evt.lockMode = lockMode // Save the lockMode calculated
     evt.data = data // Update the data to be passed
     user = (data?.usedCode as String) ?: "" // get the user if present
-
     log.trace "$lock locked by user $user $lockMode"
+
+    // Check if we have user override unlock actions defined
+    if (user && !settings."userOverrideUnlockActions${user}") {
+        log.trace "Did not find per user lock actions, falling back to global lock actions"
+        user = ""
+    }
 
     // Check if we have individual actions for each lock
     if (settings."individualDoorActions${user}") {
@@ -2024,7 +2075,7 @@ def processLockEvent(evt) {
         lockStr = ""
     }
 
-    if ((["keypad", "rfid"].any { lockMode?.contains(it) }) || (data?.usedCode != null)) { // LOCKED VIA KEYPAD/RFID
+    if ((["keypad", "rfid"].any { lockMode?.toLowerCase().contains(it) }) || (data?.usedCode != null)) { // LOCKED VIA KEYPAD/RFID
         // Check if we have a delayed action and process accordingly
         if (settings."delayLockActions${lockStr}${user}") {
             log.debug "Delaying keypad lock actions by ${settings."delayLockActionsTime${lockStr}${user}"} minutes"
@@ -2049,7 +2100,7 @@ def processLockEvent(evt) {
         def sensor = settings."sensor${lock}"
         if (sensor.latestValue("contact") == "open") {
             if (lock.hasAttribute('autolock') && (lock.latestValue("autolock") == "enabled")) { // Do not unlock if autolock features on the lock are enabled, avoid infinite loop
-                def msg = "Unlock on door open will NOT work while the AutoLock feature is enabled on $lock lock to avoid an infinite loop to locking/unlocking"
+                def msg = "Disable AutoLock on $lock lock to avoid an infinite locking/unlocking loop while using the 'Unlock on door open' feature"
                 log.warn msg
                 msgs << msg
             } else {
@@ -2081,7 +2132,7 @@ def processLockActions(evt) {
 
     log.trace "Processing $lock lock actions: $evt"
 
-    if ((["keypad", "rfid"].any { lockMode?.contains(it) }) || (data?.usedCode != null)) { // LOCKED VIA KEYPAD/RFID
+    if ((["keypad", "rfid"].any { lockMode?.toLowerCase().contains(it) }) || (data?.usedCode != null)) { // LOCKED VIA KEYPAD/RFID
         def user = ""
         def name, notify, notifyCount, notifyModes, notifyXPresence, extLockNotify, extLockNotifyModes, userOverrideActions
 
@@ -2101,7 +2152,7 @@ def processLockActions(evt) {
                 userOverrideActions = settings."userOverrideUnlockActions${i}"
 
                 // Check if we have user override lock actions defined
-                if (!settings."userOverrideUnlockActions${i}") {
+                if (!userOverrideActions) {
                     log.trace "No user $name specific lock action found, falling back to global actions"
                     user = "" // We don't have a user specific action defined, fall back to global actions
                 }
@@ -2130,11 +2181,34 @@ def processLockActions(evt) {
         } else if (settings."runXModeLockActions${lockStr}${user}"?.find{it == location.mode}) {
             log.trace "Current mode is ${location.mode}, not running lock actions for door $lock"
         } else {
-            if (settings."homeArm${lockStr}${user}") {
-                if ("homeArmStay${lockStr}${user}") {
-                    log.info "Arming Smart Home Monitor to Home"
+            // If we have a specific mode passed by the keypad lets use that otherwise use configured options
+            if (settings."keypadArmDisarm${lockStr}${user}" && (data instanceof org.codehaus.groovy.grails.web.json.JSONObject ? !data?.isNull("armMode") : (data?.armMode != null))) { // NOTE: Bug with ST, runIn passes a JSONObject instead of a map - https://community.smartthings.com/t/runin-json-vs-map/104442
+                switch (data.armMode) { // Set Keypad lock state
+                    case "armedStay":
+                    case "armedNight":
+                    	log.info "Arming Smart Home Monitor to Stay"
+                        lock.setArmedStay()
+                        sendLocationEvent(name: "alarmSystemStatus", value: "stay")
+                        msg += detailedNotifications ? ", Arming Smart Home Monitor to Stay" : ""
+                    	break
+                    
+                    case "armedAway":
+                    	log.info "Arming Smart Home Monitor to Away"
+                        lock.setArmedAway()
+                        sendLocationEvent(name: "alarmSystemStatus", value: "away")
+                        msg += detailedNotifications ? ", Arming Smart Home Monitor to Away" : ""
+                    	break
+                        
+                    default:
+                        log.warn "Invalid SHM mode detected: ${data.armMode}"
+                    	msg += ", invalid Smart Home Monitor mode ${data.armMode}"
+                        break
+                }
+            } else if (settings."homeArm${lockStr}${user}") {
+                if (settings."homeArmStay${lockStr}${user}") {
+                    log.info "Arming Smart Home Monitor to Stay"
                     sendLocationEvent(name: "alarmSystemStatus", value: "stay")
-                    msg += detailedNotifications ? ", Arming Smart Home Monitor to Home" : ""
+                    msg += detailedNotifications ? ", Arming Smart Home Monitor to Stay" : ""
                 } else {
                     log.info "Arming Smart Home Monitor to Away"
                     sendLocationEvent(name: "alarmSystemStatus", value: "away")
@@ -2217,9 +2291,9 @@ def processLockActions(evt) {
             log.trace "Current mode is ${location.mode}, not running lock actions for door $lock"
         } else {
             if (settings."homeArmManual${lockStr}") {
-                log.info "Arming Smart Home Monitor to Home/Stay"
+                log.info "Arming Smart Home Monitor to Stay"
                 sendLocationEvent(name: "alarmSystemStatus", value: "stay")
-                msg += detailedNotifications ? ", Arming Smart Home Monitor to Home" : ""
+                msg += detailedNotifications ? ", Arming Smart Home Monitor to Stay" : ""
             }
 
             if (settings."externalLockModeManual${lockStr}") {
@@ -2266,7 +2340,7 @@ def processLockActions(evt) {
         }
 
         // Send notitications for manual and electronic locking only, keypad is handled above with lock actions
-        if (settings."lockNotify${lockStr}" && (!(["keypad", "rfid"].any { lockMode?.contains(it) })) && (settings."lockNotifyModes${lockStr}" ? settings."lockNotifyModes${lockStr}".find{it == location.mode} : true)) {
+        if (settings."lockNotify${lockStr}" && (!(["keypad", "rfid"].any { lockMode?.toLowerCase().contains(it) })) && (settings."lockNotifyModes${lockStr}" ? settings."lockNotifyModes${lockStr}".find{it == location.mode} : true)) {
             msgs << msg
         }
     }
@@ -2299,7 +2373,7 @@ def clearAllCodes() {
                 
                 // ST can't clear too many codes at once, so lets prioritize since this is a fresh install of the app
                 // If we are adding a code to the slot then clear it here, otherwise mark the previous code as populated so the app will clear it eventually
-                if (code && !((locks?.size() > 1) && userLocks && !userLocks?.contains(lock.displayName))) {
+                if (code && !((locks?.size() > 1) && userLocks && !userLocks?.contains(lock.id))) {
                     deleteCode(lock, user) // Delete the user
                     def msg = "Requesting $lock to clear user $user ${name ?: ""}"
                     log.debug msg
@@ -2395,7 +2469,7 @@ def codeCheck() {
                 //log.trace "CodeCheck $i, Name: $name, Code: $code, UserType: $userType, ExpireDate: $expDate, ExpireTime: $expTime, StartDate: $startDate, StartTime: $startTime, Present: $userPresent, Not Present: $userNotPresent, UserModes: $userModes, Locks: $userLocks"
 
                 // Check if we have more than one lock and use has not selected this lock for programming then delete it
-                if ((locks?.size() > 1) && userLocks && !userLocks?.contains(lock.displayName)) {
+                if ((locks?.size() > 1) && userLocks && !userLocks?.contains(lock.id)) {
                     if (state.lockCodes[lock.id].(user as String)) {
                         deleteCode(lock, user)
                         def msg = "Requesting $lock to delete unconfigured user $user ${name ?: ""}"
@@ -2423,35 +2497,38 @@ def codeCheck() {
                             def doAdd = false
                             def msg
                             if (expDate && expTime) {
-                                def midnightToday = timeToday("2000-01-01T00:00:00.000-0000", timeZone)
-                                String dst = timeZone.getDisplayName(timeZone.inDaylightTime(new Date(now())), TimeZone.SHORT) // Keep current timezone
-                                def expT = (timeToday(expTime, timeZone).time - midnightToday.time)
-                                def expD = Date.parse("yyyy-MM-dd Z", expDate + " " + dst)
-                                def exp = expD.getTime() + expT
-                                def expStr = (new Date(exp.value)).format("EEE MMM dd yyyy HH:mm z", timeZone)
-                                if (exp > now()) {
-                                    if (startDate && startTime) {
-                                        def startT = (timeToday(startTime, timeZone).time - midnightToday.time)
-                                        def startD = Date.parse("yyyy-MM-dd Z", startDate + " " + dst)
-                                        def start = startD.getTime() + startT
-                                        def startStr = (new Date(start.value)).format("EEE MMM dd yyyy HH:mm z", timeZone)
-                                        if (start <= now()) {
-                                            msg = "Requesting $lock to add $name to user $user, code: $code, because it is scheduled to start at $startStr"
-                                            doAdd = true // we need to add the code
-                                            log.trace "$lock User $user $name is scheduled to start at $startStr and expire on $expStr"
+                                try {
+                                    // Parse the entire date/time including timezone since the Date object is converted and stored in UTC internally
+                                    def exp = Date.parse("yyyy-MM-ddHH:mmZ", expDate + timeToday(expTime, timeZone).format("HH:mmZ", timeZone))
+                                    def expStr = exp.format("EEE MMM dd yyyy HH:mm z", timeZone)
+                                    if (exp.getTime() > now()) {
+                                        if (startDate && startTime) {
+                                            try {
+                                                def start = Date.parse("yyyy-MM-ddHH:mmZ", startDate + timeToday(startTime, timeZone).format("HH:mmZ", timeZone))
+                                                def startStr = start.format("EEE MMM dd yyyy HH:mm z", timeZone)
+                                                if (start.getTime() <= now()) {
+                                                    msg = "Requesting $lock to add $name to user $user, code: $code, because it is scheduled to start at $startStr"
+                                                    doAdd = true // we need to add the code
+                                                    log.trace "$lock User $user $name is scheduled to start at $startStr and expire on $expStr"
+                                                } else {
+                                                    msg = "Requesting $lock to delete future user $user $name, start on $startStr"
+                                                    log.trace "$lock user $user $name's code is set to start in future on $startStr"
+                                                }
+                                            } catch (Exception e) {
+                                                log.error "User $user $name set to Start but does not have a valid Start Date: $startDate"
+                                            }
+                                        } else if (startDate && !startTime) {
+                                            log.error "User $user $name set to Start but does not have a valid Start Date/Time: $startDate or Time: $startTime"
                                         } else {
-                                            msg = "Requesting $lock to delete future user $user $name, start on $startStr"
-                                            log.trace "$lock user $user $name's code is set to start in future on $startStr"
+                                            msg = "Requesting $lock to add $name to user $user, code: $code, it is set to expire on $expStr"
+                                            doAdd = true // we need to add the code
+                                            log.trace "$lock User $user $name is set to expire on $expStr"
                                         }
-                                    } else if (startDate && !startTime) {
-                                        log.error "User $user $name set to Start but does not have a valid Start Date/Time: $startDate or Time: $startTime"
                                     } else {
-                                        msg = "Requesting $lock to add $name to user $user, code: $code, it is set to expire on $expStr"
-                                        doAdd = true // we need to add the code
-                                        log.trace "$lock User $user $name is set to expire on $expStr"
+                                        msg = "Requesting $lock to delete expired user $user $name, expired on $expStr"
                                     }
-                                } else {
-                                    msg = "Requesting $lock to delete expired user $user $name, expired on $expStr"
+                                } catch (Exception e) {
+                                    log.error "User $user $name set to Expire but does not have a valid Expiry Date: $expDate or Time: $expTime"
                                 }
                             } else {
                                 log.error "$lock User $user $name set to Expire but does not have a Expiration Date: $expDate or Time: $expTime"
@@ -2596,10 +2673,10 @@ def codeCheck() {
                             ('A'..'C').each { schedule ->
                                 if (checkSchedule(i, schedule)) { // Check if we are within operating schedule
                                     doAdd = true
-                                    def msg = "Schedule $schedule active $lock to add $name to user $user, code: $code, because it is scheduled to work between ${settings."userDayOfWeek${schedule}${i}"}: ${settings."userStartTime${schedule}${i}" ? (new Date(timeToday(settings."userStartTime${schedule}${i}", timeZone).time)).format("HH:mm z", timeZone) : ""} to ${settings."userEndTime${schedule}${i}" ? (new Date(timeToday(settings."userEndTime${schedule}${i}", timeZone).time)).format("HH:mm z", timeZone) : ""}"
+                                    def msg = "Schedule $schedule active $lock to add $name to user $user, code: $code, because it is scheduled to work between ${settings."userDayOfWeek${schedule}${i}"}: ${settings."userStartTime${schedule}${i}" ? timeToday(settings."userStartTime${schedule}${i}", timeZone).format("HH:mm z", timeZone) : ""} to ${settings."userEndTime${schedule}${i}" ? timeToday(settings."userEndTime${schedule}${i}", timeZone).format("HH:mm z", timeZone) : ""}"
                                     log.trace msg
                                 } else {
-                                    def msg = "Schedule $schedule NOT active for $lock $name user $user, scheduled to work between ${settings."userDayOfWeek${schedule}${i}"}: ${settings."userStartTime${schedule}${i}" ? (new Date(timeToday(settings."userStartTime${schedule}${i}", timeZone).time)).format("HH:mm z", timeZone) : ""} to ${settings."userEndTime${schedule}${i}" ? (new Date(timeToday(settings."userEndTime${schedule}${i}", timeZone).time)).format("HH:mm z", timeZone) : ""}"
+                                    def msg = "Schedule $schedule NOT active for $lock $name user $user, scheduled to work between ${settings."userDayOfWeek${schedule}${i}"}: ${settings."userStartTime${schedule}${i}" ? timeToday(settings."userStartTime${schedule}${i}", timeZone).format("HH:mm z", timeZone) : ""} to ${settings."userEndTime${schedule}${i}" ? timeToday(settings."userEndTime${schedule}${i}", timeZone).format("HH:mm z", timeZone) : ""}"
                                     log.trace msg
                                 }
                             }
