@@ -21,7 +21,7 @@
 */ 
 
 def clientVersion() {
-    return "07.08.10"
+    return "07.09.02"
 }
 
 /**
@@ -30,6 +30,10 @@ def clientVersion() {
 * Copyright RBoy Apps, redistribution or reuse of code is not allowed without permission
 *
 * Change Log:
+* 2019-04-16 - (v07.09.02) Fix optional text for ADT
+* 2019-04-12 - (v07.09.01) Check if user entered invalid characters for SMS number and notify on error
+* 2019-04-03 - (v07.09.00) Enable exit beeping on keypads using direct control for SHM/ADT when delayed actions are enabled
+* 2019-04-02 - (v07.08.12) Check for updates once a day and don't reset it everytime the user opens the app, allow user to save without selecting locks
 * 2019-03-23 - (v07.08.10) Sometimes on a fresh install ST saves corrupted data, handle it
 * 2019-03-20 - (v07.08.09) Detect if a new lock is added and Back is pressed instead of Save
 * 2019-03-18 - (v07.08.08) Show active users in green instead of blue
@@ -245,7 +249,7 @@ def setupApp() {
                     def msg = "YOUR LOCKS ARE CONFIGURED TO ACCEPT DIFFERENT CODE DIGIT LENGTHS, PROGRAMMING MAY FAIL!"
                     paragraph title: msg, required: true, ""
                 }
-                input "locks","capability.lock", title: "Lock(s)", multiple: true, submitOnChange: true, image: "http://www.rboyapps.com/images/HandleLock.png"
+                input "locks", "capability.lock", title: "Lock(s)", required: false, multiple: true, submitOnChange: true, image: "http://www.rboyapps.com/images/HandleLock.png"
             }
 
             section("User Management") {
@@ -533,7 +537,7 @@ def unlockKeypadActionsPage(params) {
             }
             if (((lock ? (isLockKeypad ? !(settings."keypadArmDisarm${lock}${user}" != false) : true) : (areAllLockKeypad ? !(settings."keypadArmDisarm${lock}${user}" != false) : true)) && settings."adtDisarm${lock}${user}") ||
                 ((lock ? isLockKeypad : isAnyLockKeypad) && (settings."keypadArmDisarm${lock}${user}" != false))) { // If we have a seleted an ADT option
-                input "adtDevices", "capability.battery", title: "Select ADT panel(s)", multiple: true, required: (settings."adtDisarm${lock}${user}" ? true : false) // Required if we select ADT
+                input "adtDevices", "capability.battery", title: "Select ADT panel${settings."adtDisarm${lock}${user}" ? "" : " (optional)"}", multiple: false, required: (settings."adtDisarm${lock}${user}" ? true : false) // Required if we select ADT
             }
             input "homePhrase${lock}${user}", "enum", title: "Run routine", required: false, options: phrases, defaultValue: priorHomePhrase
             input "homeMode${lock}${user}", "mode", title: "Change mode to", required: false, multiple: false, defaultValue: priorHomeMode
@@ -586,7 +590,7 @@ def unlockManualActionsPage(params) {
             input "homeDisarmManual${lock}", "bool", title: "Disarm Smart Home Monitor", required: false
             input "adtDisarmManual${lock}", "bool", title: "Disarm ADT", required: false, submitOnChange: true
             if (settings."adtDisarmManual${lock}") { // If we have a seleted an ADT option
-                input "adtDevices", "capability.battery", title: "Select ADT panel(s)", multiple: true, required: true // Required if we select ADT
+                input "adtDevices", "capability.battery", title: "Select ADT panel", multiple: false, required: true // Required if we select ADT
             }
             input "homePhraseManual${lock}", "enum", title: "Run routine", required: false, options: phrases, defaultValue: priorHomePhrase
             input "homeModeManual${lock}", "mode", title: "Change mode to", required: false, multiple: false, defaultValue: priorHomeMode
@@ -706,7 +710,7 @@ def lockKeypadActionsPage(params) {
             }
             if (((lock ? (isLockKeypad ? !(settings."keypadArmDisarm${lock}${user}" != false) : true) : (areAllLockKeypad ? !(settings."keypadArmDisarm${lock}${user}" != false) : true)) && settings."adtArm${lock}${user}") ||
                 ((lock ? isLockKeypad : isAnyLockKeypad) && (settings."keypadArmDisarm${lock}${user}" != false))) { // If we have a seleted an ADT option
-                input "adtDevices", "capability.battery", title: "Select ADT panel(s)", multiple: true, required: (settings."adtArm${lock}${user}" ? true : false) // Required if we select ADT
+                input "adtDevices", "capability.battery", title: "Select ADT panel${settings."adtArm${lock}${user}" ? "" : " (optional)"}", multiple: false, required: (settings."adtArm${lock}${user}" ? true : false) // Required if we select ADT
             }
             if (lock ? isLockKeypad : isAnyLockKeypad) { // Show only if we have a supported keypad (for selected lock or for general settings)
                 def hrefParams = [
@@ -777,7 +781,7 @@ def lockManualActionsPage(params) {
             input "homeArmManual${lock}", "bool", title: "Arm Smart Home Monitor to Stay", required: false
             input "adtArmManual${lock}", "bool", title: "Arm ADT to Stay", required: false, submitOnChange: true
             if (settings."adtArmManual${lock}") { // If we have a seleted an ADT option
-                input "adtDevices", "capability.battery", title: "Select ADT panel(s)", multiple: true, required: true // Required if we select ADT
+                input "adtDevices", "capability.battery", title: "Select ADT panel", multiple: false, required: true // Required if we select ADT
             }
             input "externalLockPhraseManual${lock}", "enum", title: "Run routine", required: false, options: phrases, defaultValue: priorLockPhrase
             input "externalLockModeManual${lock}", "mode", title: "Change mode to", required: false, multiple: false, defaultValue: priorHomeMode
@@ -1502,17 +1506,16 @@ def appTouch() {
     }
     def random = new Random()
     Integer randomHour = random.nextInt(18-10) + 10
-    Integer randomDayOfWeek = random.nextInt(7-1) + 1 // 1 to 7
     Calendar localCalendar = Calendar.getInstance(timeZone)
-    localCalendar.set(Calendar.DAY_OF_WEEK, randomDayOfWeek)
-    localCalendar.set(Calendar.HOUR_OF_DAY, randomHour) // Check for code updates once a week at a random day and time between 10am and 6pm
-    localCalendar.set(Calendar.MINUTE, 0)
+    localCalendar.set(Calendar.DAY_OF_WEEK, (new Date(now()))[Calendar.DAY_OF_WEEK]) // Starting today
+    localCalendar.set(Calendar.HOUR_OF_DAY, randomHour) // Check for code updates everyday at a random time between 10am and 6pm
+    localCalendar.set(Calendar.MINUTE, 3) // Offset to avoid ST platform timeout issue at top of hour
     localCalendar.set(Calendar.SECOND, 0)
     localCalendar.set(Calendar.MILLISECOND, 0)
-    if (localCalendar.getTimeInMillis() < now()) { // If it's in the past add one week to it
-        localCalendar.add(Calendar.DAY_OF_YEAR, 7)
+    if (localCalendar.getTimeInMillis() < now()) { // If it's in the past add one day to it
+        localCalendar.add(Calendar.DAY_OF_YEAR, 1)
     }
-    state.nextCodeUpdateCheck = localCalendar.getTimeInMillis()
+    state.nextCodeUpdateCheck = state.nextCodeUpdateCheck ?: localCalendar.getTimeInMillis() // If it's already set then don't update it
     log.debug "Checking for next app update after ${(new Date(state.nextCodeUpdateCheck)).format("EEE MMM dd yyyy HH:mm z", timeZone)}"
     
     // subscribe to events to kick start timers and presence/mode events to update code states
@@ -1622,15 +1625,14 @@ def changeHandler(evt) {
 
 // Handle changes to ADT states
 def adtChangeHandler(evt) {
-    log.trace "ADT state change notification, name: ${evt.name}, value: ${evt.value}"
+    log.trace "ADT state change notification, name: ${evt?.name}, value: ${evt?.value}"
 
     def msg = ""
-    def keypads = locks?.findAll{ lock -> lock.hasAttribute("armMode")} // Get all keypads and sync state with ADT
-    //def mode = settings."adtDevices"?.currentState("securitySystemStatus")?.value // This should the new ADT state
-    def user = "" // We don't check for individual user custom actions for keypads since synchronization needs to happen at the keypad level
-    def directControl = (settings."individualDoorActions${user}" ? keypads : [ "" ]).any { lock -> (settings."keypadArmDisarm${lock}${user}" != false) }
-    def mode = evt.value // Since it from a device lets take the value directly
-    if (keypads && directControl) {
+    def keypads = locks?.findAll{ it.hasAttribute("armMode") } // Get all keypads and sync state with ADT
+    // We don't check for individual user custom actions for keypads since synchronization needs to happen at the keypad level
+    keypads = (settings."individualDoorActions${""}" ? keypads.findAll { keypad -> (settings."keypadArmDisarm${keypad}${""}" != false) } : (settings."keypadArmDisarm${""}${""}" != false ? keypads : null)) // Get keypads with direct control enabled
+    def mode = settings."adtDevices"?.currentState("securitySystemStatus")?.value // This should the new ADT state
+    if (keypads) {
         switch (mode) {
             case "armedAway":
                 msg = "Detected ADT mode change, setting $keypads to Armed Away"
@@ -1662,15 +1664,14 @@ def adtChangeHandler(evt) {
 
 // Handle changes to SHM states
 def shmChangeHandler(evt) {
-    log.trace "SHM state change notification, name: ${evt.name}, value: ${evt.value}"
+    log.trace "SHM state change notification, name: ${evt?.name}, value: ${evt?.value}"
 
     def msg = ""
-    def keypads = locks?.findAll{ lock -> lock.hasAttribute("armMode")} // Get all keypads and sync state with SHM
-    def user = "" // We don't check for individual user custom actions for keypads since synchronization needs to happen at the keypad level
-    def directControl = (settings."individualDoorActions${user}" ? keypads : [ "" ]).any { lock -> (settings."keypadArmDisarm${lock}${user}" != false) }
-    //def mode = location.currentState("alarmSystemStatus")?.value // This should the new SHM state
-    def mode = evt.value // This is the changed value
-    if (keypads && directControl) {
+    def keypads = locks?.findAll{ it.hasAttribute("armMode") } // Get all keypads and sync state with SHM
+    // We don't check for individual user custom actions for keypads since synchronization needs to happen at the keypad level
+    keypads = (settings."individualDoorActions${""}" ? keypads.findAll { keypad -> (settings."keypadArmDisarm${keypad}${""}" != false) } : (settings."keypadArmDisarm${""}${""}" != false ? keypads : null)) // Get keypads with direct control enabled
+    def mode = location.currentState("alarmSystemStatus")?.value // This should the new SHM state
+    if (keypads) {
         switch (mode) {
             case "away":
                 msg = "Detected SHM mode change, setting $keypads to Armed Away"
@@ -2280,6 +2281,9 @@ def processUnlockEvent(evt) {
                                 log.info "Disarming ADT"
                                 settings."adtDevices"?.disarm() // First do this to avoid false alerts from a slow platform
                                 msg += detailedNotifications ? ", disarming ADT" : ""
+                                startTimer(1, adtChangeHandler) // If this came from a keypad and direct control for ADT is enabled, then refresh the keypad state (incase exit code beeping needs to be cancelled)
+                            } else {
+                                startTimer(1, shmChangeHandler) // If this came from a keypad and direct control for SHM is enabled, then refresh the keypad state (incase exit code beeping needs to be cancelled)
                             }
                         } catch (e) { // This is still not official so lets be cautious about it
                             log.error "Error disarming ADT\n$e"
@@ -2490,6 +2494,18 @@ def processLockEvent(evt) {
                 msgs << msg
             }
             evt.sendNotifications = true // Since it's delayed we request notifications be sent
+            // If this came from a keypad and direct control for SHM is enabled, then start an exit code beep for all keypads with direct control
+            if (data instanceof org.codehaus.groovy.grails.web.json.JSONObject ? !data?.isNull("armMode") : (data?.armMode != null)) { // NOTE: Bug with ST, runIn passes a JSONObject instead of a map - https://community.smartthings.com/t/runin-json-vs-map/104442
+                if (settings."keypadArmDisarm${lock}${""}" != false) { // If this keypad has direct control enabled
+                    def keypads = locks?.findAll{ it.hasAttribute("armMode") } // Get all keypads and sync state with SHM
+                    // We don't check for individual user custom actions for keypads since synchronization needs to happen at the keypad level
+                    keypads = (settings."individualDoorActions${""}" ? keypads.findAll { keypad -> (settings."keypadArmDisarm${keypad}${""}" != false) } : (settings."keypadArmDisarm${""}${""}" != false ? keypads : null)) // Get keypads with direct control enabled
+                    if (keypads) {
+                        log.trace "Direct SHM controls enabled, starting exit delay beeping for $keypads"
+                        keypads*.setExitDelay(settings."delayLockActionsTime${lockStr}${user}" * 60) // Start exit delay beeping for delayed actions with direct control enabled
+                    }
+                }
+            }
             startTimer(settings."delayLockActionsTime${lockStr}${user}" * 60, processLockActions, evt)
         } else {
             msgs += processLockActions(evt) // Take the message back to send out
@@ -3608,7 +3624,7 @@ def heartBeatMonitor() {
         kickStart()
     }
 
-    // We check for a code update once a week
+    // We check for a code update everyday
     TimeZone timeZone = location.timeZone
     if (!timeZone) {
         timeZone = TimeZone.getDefault()
@@ -3726,9 +3742,13 @@ private checkSchedule(def i, def x) {
 
 private void sendText(number, message) {
     if (number) {
-        def phones = number.split("\\*")
+        def phones = number.replaceAll("[;,#]", "*").split("\\*") // Some users accidentally use ;,# instead of * and ST can't handle *,#+ in the number except for + at the beginning
         for (phone in phones) {
-            sendSms(phone, message)
+            try {
+                sendSms(phone, message)
+            } catch (Exception e) {
+                sendPush "Invalid phone number $phone"
+            }
         }
     }
 }
