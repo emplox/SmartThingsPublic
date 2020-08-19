@@ -1,3 +1,13 @@
+/*
+ * -----------------------
+ * --- DEVICE HANDLER ----
+ * -----------------------
+ *
+ * STOP:  Do NOT PUBLISH the code to GitHub, it is a VIOLATION of the license terms.
+ * You are NOT allowed share, distribute, reuse or publicly host (e.g. GITHUB) the code. Refer to the license details on our website.
+ *
+ */
+
 /* **DISCLAIMER**
  * THIS SOFTWARE IS PROVIDED "AS IS" AND ANY EXPRESSED OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE REGENTS OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
  * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
@@ -11,7 +21,7 @@
  */ 
  
 def clientVersion() {
-    return "01.00.02"
+    return "01.00.07"
 }
 
 /**
@@ -19,9 +29,26 @@ def clientVersion() {
  * 
  * Copyright RBoy Apps, redistribution or reuse of code is not allowed without permission
  * Change log:
- * 2018-1-12 - (v01.00.02) Update for security descriptors
+ * 2019-11-05 - (v01.00.07) Update device health check protocol
+ * 2018-08-23 - (v01.00.06) Don't show decimal for Humidity in Android devices
+ * 2018-08-05 - (v01.00.05) Added Health Check capability
+ * 2018-08-02 - (v01.00.04) Added basic support for new ST app
+ * 2018-01-31 - (v01.00.03) Updated layout to show all sensors on a single screen and temperature offset is now in decimal points
+ * 2018-01-12 - (v01.00.02) Update for security descriptors
  * 2017-10-18 - (v01.00.01) Update tile layout with ST mobile app release 2.8.0
- * 2017-7-14 - (v01.00.00) Initial release
+ * 2017-07-14 - (v01.00.00) Initial release
+ *
+ *  Copyright 2014 SmartThings
+ *
+ *  Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except
+ *  in compliance with the License. You may obtain a copy of the License at:
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ *  Unless required by applicable law or agreed to in writing, software distributed under the License is distributed
+ *  on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License
+ *  for the specific language governing permissions and limitations under the License.
+ *
  */
 
 preferences {
@@ -34,7 +61,7 @@ preferences {
 	input title: "", description: "The temperature sensitivity threshold represents how much the temperature levels should change before reporting it. The threshold can vary from 0.1° (very sensitive) to 5° (least sensitive) (default is 1.0)", displayDuringSetup: false, type: "paragraph", element: "paragraph"
     input "tempSensitivity", "decimal", title: "Temperature Sensitivity", displayDuringSetup: false, range: "0.1..5.0"
 	input title: "", description: "Temperature correction offset is a +ve or -ve number to correct the temperature reported by the sensor", displayDuringSetup: false, type: "paragraph", element: "paragraph"
-    input "tempOffset", "number", title: "Temperature correction offset", displayDuringSetup: false, range: "*..*"
+    input "tempOffset", "decimal", title: "Temperature correction offset", displayDuringSetup: false, range: "*..*"
 	input title: "", description: "Set the motion detection sensitivity level. 1 is MOST sensitive and 7 is LEAST sensitive (default is 4)", displayDuringSetup: false, type: "paragraph", element: "paragraph"
     input "pirSensitivity", "number", title: "Motion Sensitivity", displayDuringSetup: false, range: "1..7"
 	input title: "", description: "The light sensitivity threshold represents what % the light levels should change before reporting it. The threshold can vary from 5% (very sensitive) to 50% (least sensitive) (default is 10%)", displayDuringSetup: false, type: "paragraph", element: "paragraph"
@@ -52,7 +79,7 @@ preferences {
 }
 
 metadata {
-    definition (name:"Monoprice 4 in 1 Motion, Humidity, Illuminance and Temperature Sensor (Enhanced)", namespace:"rboy", author: "RBoy Apps") {
+    definition (name:"Monoprice 4 in 1 Motion, Humidity, Illuminance and Temperature Sensor (Enhanced)", namespace:"rboy", author: "RBoy Apps", ocfDeviceType: "x.com.st.d.sensor.motion", mnmn: "SmartThings", vid:"SmartThings-smartthings-Aeon_Multisensor") {
 		capability "Configuration"
         capability "Sensor"
         capability "Motion Sensor"
@@ -61,6 +88,7 @@ metadata {
 		capability "Illuminance Measurement"
         capability "Battery"
         capability "Tamper Alert"
+        capability "Health Check"
         
         attribute "codeVersion", "string"
         attribute "dhName", "string"
@@ -79,11 +107,11 @@ metadata {
                 attributeState "active", label:'motion', icon:"st.motion.motion.active", backgroundColor:"#00a0dc"
                 attributeState "inactive", label:'no motion', icon:"st.motion.motion.inactive", backgroundColor:"#ffffff"
             }
-            tileAttribute ("device.temperature", key: "SECONDARY_CONTROL") {
-				attributeState "temperature", label:'${currentValue}°'
-            }
+            //tileAttribute ("device.temperature", key: "SECONDARY_CONTROL") {
+			//	attributeState "temperature", label:'${currentValue}°'
+            //}
         }
-		valueTile("temperature", "device.temperature", width: 4, height: 4) {
+		valueTile("temperature", "device.temperature", width: 2, height: 2) {
 			state("temperature", label:'${currentValue}°',
                   backgroundColors:[
                       // Celsius
@@ -158,14 +186,29 @@ private Double[] luxTable() {
     return [ 0.0, 1.0, 2.0, 5.0, 10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0 ]
 }
 
-
-def updated() {
-	log.trace "Update called settings: $settings"
+def installed() {
+	log.trace "Installed called settings: $settings"
+	// Device-Watch simply pings if no device events received for 482min(checkInterval)
+	sendEvent(name: "checkInterval", value: 2 * 4 * 60 * 60 + 2 * 60, displayed: false, data: [protocol: "zwave", hubHardwareId: device.hub.hardwareID, offlinePingable: "1"])
 	try {
 		if (!state.init) {
 			state.init = true
 		}
-        configure() // Get the updates
+        response(configure()) // Get the updates
+	} catch (e) {
+		log.warn "updated() threw $e"
+	}
+}
+
+def updated() {
+	log.trace "Update called settings: $settings"
+	// Device-Watch simply pings if no device events received for 482min(checkInterval)
+	sendEvent(name: "checkInterval", value: 2 * 4 * 60 * 60 + 2 * 60, displayed: false, data: [protocol: "zwave", hubHardwareId: device.hub.hardwareID, offlinePingable: "1"])
+	try {
+		if (!state.init) {
+			state.init = true
+		}
+        response(configure()) // Get the updates
 	} catch (e) {
 		log.warn "updated() threw $e"
 	}
@@ -469,7 +512,7 @@ def zwaveEvent(physicalgraph.zwave.commands.sensormultilevelv5.SensorMultilevelR
             
 		case 5:
 			map.name = "humidity"
-			map.value = ((cmd.scaledSensorValue as Double) + (humidityOffset ?: 0)).round(0) // no decimals, keep it clean
+			map.value = ((cmd.scaledSensorValue as Double) + (humidityOffset ?: 0)).round(0) as Integer // no decimals, keep it clean
 			map.unit = "%"
             map.descriptionText = "${device.displayName} humidity is ${map.value}${map.unit}"
             if (displaySensor == "Humidity") { // Update summary display sensor
@@ -737,3 +780,5 @@ private Double interpolate(Double[] x, Double[] y, Double xi) {
 
     return yi;
 }
+
+// THIS IS THE END OF THE FILE
